@@ -1,0 +1,30 @@
+{
+  "name": "customer-ops-model-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "mastra dev",
+    "build": "mastra build",
+    "start": "mastra start",
+    "check:model-server": "node --env-file-if-exists=.env scripts/check-model-server.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "latest",
+    "@mastra/core": "latest",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "mastra": "latest",
+    "pnpm": "10.13.1",
+    "typescript": "^6.0.0",
+    "vitest": "latest"
+  },
+  "packageManager": "pnpm@10.13.1"
+}

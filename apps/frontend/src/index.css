@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    @apply bg-background text-on-background;
+    font-family: "Inter", system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  /* Level-1 card per DESIGN.md: white, 1px outline, no heavy shadow */
+  .bento-card {
+    @apply bg-surface-container-lowest border border-outline-variant;
+  }
+
+  /* Input focus "halo" — 2px primary ring at low opacity (DESIGN.md) */
+  .input-focus-halo {
+    @apply outline-none transition-all;
+  }
+  .input-focus-halo:focus {
+    @apply border-primary ring-2 ring-primary/10;
+  }
+}
+
+/* Material Symbols base sizing */
+.material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  user-select: none;
+}
+
+/* Streaming indicator animation for the AI bubble */
+@keyframes streaming-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.streaming-dots {
+  animation: streaming-blink 1.2s ease-in-out infinite;
+}

@@ -1,0 +1,66 @@
+{
+	"name": "customer-ops-frontend",
+	"version": "0.1.0",
+	"description": "智能客服系统前端 — Service Console（基于自定义 SSR 模板）",
+	"main": "index.js",
+	"scripts": {
+		"dev": "NODE_ENV=development tsx app/server/server.ts",
+		"build": "node scripts/build.mjs",
+		"build:client": "node scripts/build.mjs --target client",
+		"build:server": "node scripts/build.mjs --target server",
+		"preview:ssr": "NODE_ENV=production PORT=3001 node build/server/server.js",
+		"start": "NODE_ENV=production node build/server/server.js",
+		"start:pm2": "pm2 start ./ecosystem.config.js",
+		"typecheck": "tsc --noEmit",
+		"lint": "eslint \"{app,src}/**/*.{ts,tsx}\"",
+		"mock": "json-server --watch ./mocks/data.json --port 8007"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"dependencies": {
+		"@koa/router": "^12.0.0",
+		"@tanstack/react-query": "^5.83.0",
+		"axios": "^1.3.6",
+		"koa": "^2.14.1",
+		"koa-mount": "^4.0.0",
+		"koa-static": "^5.0.0",
+		"react": "^19.1.0",
+		"react-dom": "^19.1.0",
+		"react-helmet-async": "^1.3.0",
+		"react-router-dom": "^7.6.3",
+		"serverless-http": "^3.2.0"
+	},
+	"devDependencies": {
+		"@vitejs/plugin-react": "^5.0.0",
+		"@types/koa": "^2.13.6",
+		"@types/koa-mount": "^4.0.2",
+		"@types/koa-static": "^4.0.2",
+		"@types/koa__router": "^12.0.0",
+		"@types/node": "^18.15.11",
+		"@types/react": "^19.1.8",
+		"@types/react-dom": "^19.1.6",
+		"@typescript-eslint/eslint-plugin": "^5.62.0",
+		"@typescript-eslint/parser": "^5.62.0",
+		"autoprefixer": "^10.4.20",
+		"eslint": "^7.32.0",
+		"eslint-config-prettier": "^8.8.0",
+		"eslint-plugin-prettier": "^4.2.1",
+		"eslint-plugin-react": "^7.32.2",
+		"json-server": "^0.17.3",
+		"less": "^4.1.3",
+		"pm2": "^5.3.0",
+		"postcss": "^8.4.47",
+		"tailwindcss": "^3.3.1",
+		"tsx": "^4.19.2",
+		"typescript": "^5.0.3",
+		"vite": "^7.0.0",
+		"vite-tsconfig-paths": "^5.1.4"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild"
+		]
+	},
+	"packageManager": "pnpm@10.13.1"
+}

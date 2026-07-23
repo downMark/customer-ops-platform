@@ -1,0 +1,422 @@
+//! HTTP 路由与全局中间件集中配置。
+
+use std::time::Duration;
+
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::Router;
+use tower_http::timeout::TimeoutLayer;
+use tower_http::trace::TraceLayer;
+
+use crate::handler;
+use crate::state::AppState;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 构造不依赖具体运行时的应用 Router。
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/auth/login", post(handler::auth::login))
+        .route("/api/orders/{order_id}", get(handler::orders::get_order))
+        .route(
+            "/api/conversations/{conversation_id}/complete",
+            post(handler::conversations::complete_conversation),
+        )
+        .route("/api/health", get(handler::health::health))
+        .layer(axum::middleware::from_fn(handler::middleware::trace_id))
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Method, Request};
+    use chrono::{TimeZone, Utc};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::application::complete_conversation::CompleteConversation;
+    use crate::application::get_order::GetOrder;
+    use crate::application::login::Login;
+    use crate::domain::auth::{
+        AuthError, AuthServiceError, AuthUser, IssuedToken, PasswordVerifier, TokenIssuer,
+        TokenVerifier,
+    };
+    use crate::domain::conversation::{
+        ConversationCompletion, ConversationRepository, SaveOutcome,
+    };
+    use crate::domain::event::{ConversationCompleted, EventPublisher, PublishError};
+    use crate::domain::order::Order;
+    use crate::domain::repository::{OrderRepository, RepoError};
+    use crate::domain::user::{UserAccount, UserRepository};
+
+    struct FakeOrderRepository;
+
+    #[async_trait]
+    impl OrderRepository for FakeOrderRepository {
+        async fn find_owned(
+            &self,
+            order_id: &str,
+            user_id: &str,
+        ) -> Result<Option<Order>, RepoError> {
+            let owned = (order_id == "COP-10086" && user_id == "test-user-1")
+                || (order_id == "ADMIN-2026-0001" && user_id == "test-operator");
+            if !owned {
+                return Ok(None);
+            }
+            Ok(Some(Order {
+                order_id: order_id.to_string(),
+                status: "shipped".into(),
+                status_text: "已发货".into(),
+                carrier: None,
+                tracking_number: None,
+                estimated_delivery_at: None,
+                updated_at: Utc
+                    .with_ymd_and_hms(2026, 7, 22, 12, 0, 0)
+                    .single()
+                    .expect("valid test timestamp"),
+            }))
+        }
+
+        async fn exists(&self, order_id: &str) -> Result<bool, RepoError> {
+            Ok(matches!(order_id, "COP-10086" | "ADMIN-2026-0001"))
+        }
+    }
+
+    struct FakeConversationRepository;
+
+    #[async_trait]
+    impl ConversationRepository for FakeConversationRepository {
+        async fn save_once(
+            &self,
+            _record: &ConversationCompletion,
+        ) -> Result<SaveOutcome, RepoError> {
+            Ok(SaveOutcome::Inserted)
+        }
+    }
+
+    struct FakePublisher;
+
+    #[async_trait]
+    impl EventPublisher for FakePublisher {
+        async fn publish(&self, _event: &ConversationCompleted) -> Result<(), PublishError> {
+            Ok(())
+        }
+    }
+
+    struct FakeVerifier;
+
+    impl TokenVerifier for FakeVerifier {
+        fn verify(&self, bearer_token: &str) -> Result<AuthUser, AuthError> {
+            if bearer_token == "valid-token" {
+                Ok(AuthUser {
+                    user_id: "test-user-1".into(),
+                })
+            } else if bearer_token == "operator-token" {
+                Ok(AuthUser {
+                    user_id: "test-operator".into(),
+                })
+            } else {
+                Err(AuthError::InvalidToken)
+            }
+        }
+    }
+
+    struct FakeUserRepository;
+
+    #[async_trait]
+    impl UserRepository for FakeUserRepository {
+        async fn find_by_username(&self, username: &str) -> Result<Option<UserAccount>, RepoError> {
+            Ok((username == "test-operator").then(|| UserAccount {
+                user_id: "test-operator".into(),
+                username: "test-operator".into(),
+                password_hash: "test-hash".into(),
+                role: "operator".into(),
+                is_active: true,
+            }))
+        }
+    }
+
+    struct FakePasswordVerifier;
+
+    impl PasswordVerifier for FakePasswordVerifier {
+        fn verify(&self, password: &str, _password_hash: &str) -> Result<bool, AuthServiceError> {
+            Ok(password == "correct-password")
+        }
+    }
+
+    struct FakeTokenIssuer;
+
+    impl TokenIssuer for FakeTokenIssuer {
+        fn issue(&self, _account: &UserAccount) -> Result<IssuedToken, AuthServiceError> {
+            Ok(IssuedToken {
+                access_token: "operator-token".into(),
+                expires_in: 86_400,
+            })
+        }
+    }
+
+    fn test_router() -> Router {
+        build_router(AppState::new(
+            Arc::new(GetOrder::new(Arc::new(FakeOrderRepository))),
+            Arc::new(CompleteConversation::new(
+                Arc::new(FakeConversationRepository),
+                Arc::new(FakePublisher),
+            )),
+            Arc::new(Login::new(
+                Arc::new(FakeUserRepository),
+                Arc::new(FakePasswordVerifier),
+                Arc::new(FakeTokenIssuer),
+            )),
+            Arc::new(FakeVerifier),
+        ))
+    }
+
+    async fn json_body(response: axum::response::Response) -> Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body can be collected")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("response body is JSON")
+    }
+
+    #[tokio::test]
+    async fn health_route_preserves_trace_id_and_envelope() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("x-trace-id", "trace_test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-trace-id"], "trace_test");
+        let body = json_body(response).await;
+        assert_eq!(body["code"], 200);
+        assert_eq!(body["data"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn health_route_generates_trace_id() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers()["x-trace-id"]
+            .to_str()
+            .unwrap()
+            .starts_with("trace_"));
+    }
+
+    #[tokio::test]
+    async fn order_route_returns_owned_order() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orders/COP-10086")
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["orderId"], "COP-10086");
+        assert_eq!(body["data"]["statusText"], "已发货");
+    }
+
+    #[tokio::test]
+    async fn login_token_can_query_owned_order() {
+        let login_response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "username": "test-operator",
+                            "password": "correct-password"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login_response.status(), StatusCode::OK);
+        let login_body = json_body(login_response).await;
+        assert_eq!(login_body["data"]["tokenType"], "Bearer");
+        assert_eq!(login_body["data"]["expiresIn"], 86_400);
+        assert_eq!(login_body["data"]["user"]["userId"], "test-operator");
+        let token = login_body["data"]["accessToken"].as_str().unwrap();
+
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orders/ADMIN-2026-0001")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await["data"]["orderId"],
+            "ADMIN-2026-0001"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_rejects_bad_credentials_without_account_disclosure() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "username": "test-operator",
+                            "password": "wrong-password"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], 40101);
+        assert_eq!(body["msg"], "未授权");
+    }
+
+    #[tokio::test]
+    async fn order_route_rejects_missing_token_with_unified_error() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orders/COP-10086")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], 40101);
+        assert_eq!(body["success"], false);
+        assert!(body["data"].is_null());
+    }
+
+    #[tokio::test]
+    async fn order_route_rejects_invalid_token() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orders/COP-10086")
+                    .header("authorization", "Bearer invalid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(response).await["code"], 40101);
+    }
+
+    #[tokio::test]
+    async fn order_route_maps_application_error_to_http_envelope() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orders/UNKNOWN")
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], 40401);
+        assert_eq!(body["success"], false);
+        assert!(body["data"].is_null());
+    }
+
+    #[tokio::test]
+    async fn conversation_complete_route_keeps_existing_contract() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/conversations/conv_123/complete")
+                    .header("authorization", "Bearer valid-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "orderId": "COP-10086" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["conversationId"], "conv_123");
+        assert_eq!(body["data"]["published"], true);
+    }
+
+    #[tokio::test]
+    async fn routes_keep_method_and_path_matching() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/conversations/conv_123/complete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}

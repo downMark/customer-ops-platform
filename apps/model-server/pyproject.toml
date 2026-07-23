@@ -1,0 +1,24 @@
+[project]
+name = "customer-ops-model-server"
+version = "0.1.0"
+description = "FastAPI inference server for the customer-ops GGUF model"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "llama-cpp-python>=0.3.16,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.uv]
+package = false

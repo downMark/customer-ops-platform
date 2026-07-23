@@ -1,0 +1,44 @@
+[package]
+name = "customer-ops-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "timeout", "cors"] }
+sea-orm = { version = "1", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-chrono",
+] }
+sea-orm-migration = { version = "1", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+dotenvy = "0.15"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+# AWS SDK 仅在启用 `sns` feature 时编译（其最新版要求 rustc ≥ 1.94.1）。
+# 本地默认用 NoopPublisher，无需 AWS 依赖；部署环境用 `--features sns` 打开真实 SNS。
+aws-config = { version = "1", features = [
+    "behavior-version-latest",
+], optional = true }
+aws-sdk-sns = { version = "1", optional = true }
+
+[features]
+default = []
+sns = ["dep:aws-config", "dep:aws-sdk-sns"]
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

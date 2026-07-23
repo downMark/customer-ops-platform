@@ -1,0 +1,6 @@
+# macOS 会在外接磁盘上创建 AppleDouble 元数据文件。
+._*
+**/._*
+/.claude
+/specs
+/ui
