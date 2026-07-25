@@ -145,13 +145,33 @@ Resources:
         - IpProtocol: tcp
           FromPort: 8000
           ToPort: 8000
-          CidrIp: !Ref VpcCidr
+          SourceSecurityGroupId: !Ref ModelApiSecurityGroup
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
           Value: !Sub customer-ops-${Environment}-model-server
+
+  ModelServerSubnet1Ingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ModelServerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 8000
+      CidrIp: !Ref PublicSubnet1Cidr
+      Description: Internal NLB health checks and model API traffic from subnet 1
+
+  ModelServerSubnet2Ingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ModelServerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 8000
+      CidrIp: !Ref PublicSubnet2Cidr
+      Description: Internal NLB health checks and model API traffic from subnet 2
 
   ModelApiRepository:
     Type: AWS::ECR::Repository
