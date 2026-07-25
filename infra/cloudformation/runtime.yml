@@ -80,6 +80,7 @@ Resources:
                   Fn::ImportValue: !Sub customer-ops-${Environment}-jwt-secret
           AUTH_JWT_TTL_SECONDS: "86400"
           DB_MAX_CONNECTIONS: "2"
+          AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH: "true"
           CORS_ORIGINS:
             Fn::ImportValue: !Sub customer-ops-${Environment}-frontend-origin
           SNS_TOPIC_ARN:
