@@ -1,8 +1,8 @@
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
-    CMAKE_ARGS=-DGGML_CUDA=on \
+    CMAKE_ARGS="-DGGML_CUDA=off -DGGML_NATIVE=off" \
     FORCE_CMAKE=1
 
 RUN apt-get update \
@@ -12,7 +12,6 @@ RUN apt-get update \
         cmake \
         git \
         ninja-build \
-        python3 \
         python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -23,7 +22,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 ARG TARGETARCH
 
@@ -38,7 +37,6 @@ RUN apt-get update \
         ca-certificates \
         curl \
         libgomp1 \
-        python3 \
         unzip \
     && case "${TARGETARCH:-amd64}" in \
         amd64) aws_arch=x86_64 ;; \

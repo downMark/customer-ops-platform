@@ -8,17 +8,17 @@ only publish code or images after the two platform stacks exist.
 - `customer-ops-<environment>-foundation`
   - VPC, two public subnets, security groups
   - ECR repositories and Lambda artifact bucket
-  - ECS cluster, GPU EC2 Auto Scaling group and capacity provider
+  - ECS cluster for CPU Fargate services
   - task roles, log groups, Secrets Manager secrets
   - SNS topic, quality/analytics queues and their DLQs
 - `customer-ops-<environment>-runtime`
   - backend Lambda, version aliases, API Gateway REST API and canary stage
-  - private model-server NLB and GPU ECS service
+  - private model-server NLB and CPU Fargate service
   - public model-api ALB and Fargate ECS service
 
-The GPU instance is created only when the Infrastructure workflow is explicitly
-dispatched with `PROVISION`. It has ongoing EC2 and EBS cost until the foundation
-stack is deleted or its Auto Scaling desired capacity is changed to zero.
+The model-server uses 4 vCPU, 16 GiB memory, and 30 GiB ephemeral storage. It
+downloads the merged, quantized GGUF from S3 at task startup and performs CPU
+inference without CUDA.
 
 ## GitHub Environments
 

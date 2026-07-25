@@ -15,11 +15,6 @@ on:
         description: Type PROVISION to create/update billable AWS resources
         required: true
         type: string
-      gpu_instance_type:
-        description: GPU EC2 instance type
-        required: true
-        default: g4dn.xlarge
-        type: string
 
 concurrency:
   group: infrastructure-${{ inputs.environment }}
@@ -85,8 +80,7 @@ jobs:
               DatabaseUrl="${DATABASE_URL}" \
               FrontendOrigin="${FRONTEND_ORIGIN}" \
               ModelBucketName="${MODEL_BUCKET_NAME}" \
-              ModelObjectKey="${MODEL_OBJECT_KEY}" \
-              GpuInstanceType="${{ inputs.gpu_instance_type }}"
+              ModelObjectKey="${MODEL_OBJECT_KEY}"
 
       - name: Read foundation outputs
         id: foundation
@@ -163,7 +157,7 @@ jobs:
           cache-from: type=gha,scope=model-api
           cache-to: type=gha,mode=max,scope=model-api
 
-      - name: Build and push GPU model-server image
+      - name: Build and push CPU model-server image
         uses: docker/build-push-action@v6
         with:
           context: apps/model-server
@@ -271,5 +265,5 @@ jobs:
             echo "- Backend API: \`${BACKEND_API_URL}\`"
             echo "- Model API origin: \`${MODEL_API_URL}\`"
             echo "- Frontend URL: \`${{ steps.cloudflare.outputs.deployment-url }}\`"
-            echo "- GPU instance: \`${{ inputs.gpu_instance_type }}\`"
+            echo "- Model inference: CPU Fargate (4 vCPU / 16 GiB)"
           } >> "${GITHUB_STEP_SUMMARY}"

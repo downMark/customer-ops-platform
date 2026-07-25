@@ -252,7 +252,7 @@ Resources:
         Fn::ImportValue: !Sub customer-ops-${Environment}-vpc-id
       Port: 8000
       Protocol: TCP
-      TargetType: instance
+      TargetType: ip
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
       HealthCheckPath: /health
@@ -275,29 +275,25 @@ Resources:
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: !Sub customer-ops-${Environment}-model-server
-      RequiresCompatibilities: [EC2]
-      NetworkMode: host
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "4096"
+      Memory: "16384"
+      EphemeralStorage:
+        SizeInGiB: 30
       ExecutionRoleArn:
         Fn::ImportValue: !Sub customer-ops-${Environment}-task-execution-role
       TaskRoleArn:
         Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-task-role
       Volumes:
         - Name: model-cache
-          Host:
-            SourcePath: /opt/customer-ops/models
       ContainerDefinitions:
         - Name: model-server
           Image: !Ref ModelServerImageUri
           Essential: true
-          Cpu: 2048
-          Memory: 14000
           PortMappings:
             - ContainerPort: 8000
-              HostPort: 8000
               Protocol: tcp
-          ResourceRequirements:
-            - Type: GPU
-              Value: "1"
           MountPoints:
             - SourceVolume: model-cache
               ContainerPath: /models
@@ -316,7 +312,9 @@ Resources:
             - Name: MODEL_PORT
               Value: "8000"
             - Name: MODEL_GPU_LAYERS
-              Value: "-1"
+              Value: "0"
+            - Name: MODEL_THREADS
+              Value: "4"
           Secrets:
             - Name: MODEL_SERVER_API_KEY
               ValueFrom:
@@ -338,13 +336,21 @@ Resources:
         Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
       TaskDefinition: !Ref ModelServerTaskDefinition
       DesiredCount: 1
-      CapacityProviderStrategy:
-        - CapacityProvider:
-            Fn::ImportValue: !Sub customer-ops-${Environment}-gpu-capacity-provider
-          Weight: 1
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      HealthCheckGracePeriodSeconds: 900
       DeploymentConfiguration:
         MinimumHealthyPercent: 0
         MaximumPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            Fn::Split:
+              - ","
+              - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
+          SecurityGroups:
+            - Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-sg
       LoadBalancers:
         - ContainerName: model-server
           ContainerPort: 8000

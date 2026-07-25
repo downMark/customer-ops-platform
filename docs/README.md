@@ -240,7 +240,8 @@ Mastra 使用 FastAPI 的 OpenAI 兼容接口：
 http://127.0.0.1:8000/v1
 ```
 
-生产环境中 `model-server` 运行在受控 GPU 主机或企业私网中，必须配置服务密钥，不能把未鉴权的模型端口暴露到公网。
+生产环境中 `model-server` 运行在私有 CPU Fargate Service 中，必须配置服务
+密钥，不能把未鉴权的模型端口暴露到公网。
 
 ## 8. 部署边界与 GitHub Actions
 
@@ -251,7 +252,7 @@ http://127.0.0.1:8000/v1
 | `event-worker` | Lambda，由 SQS Event Source Mapping 触发       |
 | SNS/SQS/DLQ    | AWS 托管服务                                  |
 | `model-api`    | ECS Service + 公网 HTTPS ALB，支持 SSE         |
-| `model-server` | 私有 ECS GPU EC2 Service + CUDA llama-cpp-python |
+| `model-server` | 私有 ECS CPU Fargate Service + llama-cpp-python |
 | Synthetics     | CloudWatch Synthetics                         |
 | 基础设施       | CloudFormation                                |
 
@@ -268,8 +269,8 @@ http://127.0.0.1:8000/v1
   Cargo Lambda 构建 ZIP，然后通过 AWS OIDC 更新现有 Lambda 函数并发布新版本。
 - `.github/workflows/model-api-ecs.yml`：测试并构建 Mastra 容器，推送 ECR，
   将不可变 commit SHA 镜像写入现有 ECS Task Definition 后滚动部署。
-- `.github/workflows/model-server-ecs.yml`：测试并构建 CUDA 推理容器，推送
-  ECR，并滚动部署私有 GPU ECS Service。GGUF 不进入镜像。
+- `.github/workflows/model-server-ecs.yml`：测试并构建 CPU 推理容器，推送
+  ECR，并滚动部署私有 Fargate Service。GGUF 不进入镜像。
 
 Pull Request 只执行检查，不发布。合并到 `main` 且对应应用目录有变更时自动
 发布 `production`；也可以从 Actions 页面手动运行并选择 `staging` 或
@@ -319,8 +320,8 @@ Python model-server Environment variables：
 
 | 名称 | 用途 |
 | ---- | ---- |
-| `MODEL_SERVER_ECR_REPOSITORY` | GPU 模型服务 ECR Repository 名 |
-| `MODEL_SERVER_ECS_CLUSTER` | GPU ECS Cluster 名 |
+| `MODEL_SERVER_ECR_REPOSITORY` | CPU 模型服务 ECR Repository 名 |
+| `MODEL_SERVER_ECS_CLUSTER` | Fargate ECS Cluster 名 |
 | `MODEL_SERVER_ECS_SERVICE` | 私有模型 ECS Service 名 |
 | `MODEL_SERVER_ECS_CONTAINER_NAME` | Task Definition 中的容器名 |
 | `MODEL_SERVER_TASK_DEFINITION_FAMILY` | 当前 Task Definition family |
@@ -356,10 +357,11 @@ Mastra ECS          ──TCP 8000──> private Python model-server
 
 - Mastra ALB 的 443 端口面向公网，应用层 CORS 仅允许实际 Cloudflare 域名。
 - Mastra Task 不分配不必要的入站端口；ALB 只转发到其 4111 端口。
-- Python Task 不分配公网 IP、不挂公网 ALB。其 Security Group 的 TCP 8000
-  入站来源只能是 Mastra Task Security Group。
-- Python Task 必须由 GPU ECS EC2 Capacity Provider 调度，并声明
-  `resourceRequirements: [{"type":"GPU","value":"1"}]`；Fargate 不承载该任务。
+- Python Task 不挂公网 ALB。当前无 NAT 的公共子网为任务分配公网 IP，仅用于
+  拉取 ECR 镜像和 S3 模型；Security Group 的 TCP 8000 入站来源只能是
+  Mastra Task Security Group。
+- Python Task 使用 CPU Fargate，配置 4 vCPU、16 GiB 内存、30 GiB 临时磁盘，
+  `MODEL_GPU_LAYERS=0`，运行时不依赖 CUDA。
 - `MODEL_SERVER_API_KEY` 通过 Secrets Manager 同时注入两边，作为网络限制之外
   的第二层认证。
 - Python ECS Task Role 仅允许
@@ -369,12 +371,12 @@ Mastra ECS          ──TCP 8000──> private Python model-server
 
 ### 8.4 首次部署前提
 
-GitHub Actions 发布应用代码，不代替基础设施创建：
+首次部署由 `Infrastructure - Provision Platform` 工作流统一编排：
 
 1. 先创建 Cloudflare API Token，并在两个 GitHub Environment 中配置变量。
-2. 先用 CloudFormation 创建 x86_64 Lambda、执行角色、API Gateway 和 SNS。
-3. 创建 ECR Repositories、Mastra ECS Service、GPU ECS EC2 Service、私有
-   Service Discovery 和上述 Security Groups。
+2. 用 CloudFormation 创建 x86_64 Lambda、执行角色、API Gateway 和 SNS。
+3. 创建 ECR Repositories、Mastra Fargate Service、CPU model-server Fargate
+   Service、私有 NLB 和上述 Security Groups。
 4. Python Task Definition 配置 `MODEL_S3_URI`、模型 Task Role 和
    `MODEL_SERVER_API_KEY`；Mastra Task Definition 配置私有
    `MODEL_SERVER_BASE_URL`、同一 API Key、Backend URL 与前端 CORS。

@@ -58,7 +58,7 @@ class Settings:
             host=os.getenv("MODEL_HOST", "127.0.0.1"),
             port=_integer("MODEL_PORT", 8000),
             context_size=_integer("MODEL_CONTEXT_SIZE", 4096),
-            gpu_layers=_integer("MODEL_GPU_LAYERS", -1),
+            gpu_layers=_integer("MODEL_GPU_LAYERS", 0),
             threads=_integer("MODEL_THREADS", 0),
             temperature=_floating("MODEL_TEMPERATURE", 0.2),
             top_p=_floating("MODEL_TOP_P", 0.8),

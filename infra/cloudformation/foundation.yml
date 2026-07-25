@@ -19,9 +19,6 @@ Parameters:
   ModelObjectKey:
     Type: String
     Default: models/customer-ops/customer-ops-q4_k_m.gguf
-  GpuInstanceType:
-    Type: String
-    Default: g4dn.xlarge
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
@@ -31,10 +28,6 @@ Parameters:
   PublicSubnet2Cidr:
     Type: String
     Default: 10.42.1.0/24
-  GpuAmiId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended/image_id
-
 Resources:
   Vpc:
     Type: AWS::EC2::VPC
@@ -143,10 +136,10 @@ Resources:
         - Key: Name
           Value: !Sub customer-ops-${Environment}-model-api
 
-  GpuInstanceSecurityGroup:
+  ModelServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: GPU ECS instances serving the private model endpoint
+      GroupDescription: CPU model-server Fargate tasks
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -158,7 +151,7 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub customer-ops-${Environment}-gpu
+          Value: !Sub customer-ops-${Environment}-model-server
 
   ModelApiRepository:
     Type: AWS::ECR::Repository
@@ -180,7 +173,7 @@ Resources:
       ImageTagMutability: MUTABLE
       LifecyclePolicy:
         LifecyclePolicyText: |
-          {"rules":[{"rulePriority":1,"description":"Retain 10 GPU images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+          {"rules":[{"rulePriority":1,"description":"Retain 10 model-server images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
 
   DeploymentBucket:
     Type: AWS::S3::Bucket
@@ -301,86 +294,6 @@ Resources:
         - Name: containerInsights
           Value: enabled
 
-  EcsInstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub customer-ops-${Environment}-ecs-instance
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
-
-  EcsInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      InstanceProfileName: !Sub customer-ops-${Environment}-ecs-instance
-      Roles:
-        - !Ref EcsInstanceRole
-
-  GpuLaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateName: !Sub customer-ops-${Environment}-gpu
-      LaunchTemplateData:
-        ImageId: !Ref GpuAmiId
-        InstanceType: !Ref GpuInstanceType
-        IamInstanceProfile:
-          Arn: !GetAtt EcsInstanceProfile.Arn
-        SecurityGroupIds:
-          - !Ref GpuInstanceSecurityGroup
-        MetadataOptions:
-          HttpEndpoint: enabled
-          HttpTokens: required
-          HttpPutResponseHopLimit: 2
-        BlockDeviceMappings:
-          - DeviceName: /dev/xvda
-            Ebs:
-              VolumeSize: 80
-              VolumeType: gp3
-              Encrypted: true
-        UserData:
-          Fn::Base64: !Sub |
-            #!/bin/bash
-            echo "ECS_CLUSTER=${EcsCluster}" >> /etc/ecs/ecs.config
-            echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
-
-  GpuAutoScalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      AutoScalingGroupName: !Sub customer-ops-${Environment}-gpu
-      VPCZoneIdentifier:
-        - !Ref PublicSubnet1
-        - !Ref PublicSubnet2
-      MinSize: "0"
-      MaxSize: "1"
-      DesiredCapacity: "1"
-      NewInstancesProtectedFromScaleIn: true
-      LaunchTemplate:
-        LaunchTemplateId: !Ref GpuLaunchTemplate
-        Version: !GetAtt GpuLaunchTemplate.LatestVersionNumber
-      Tags:
-        - Key: Name
-          Value: !Sub customer-ops-${Environment}-gpu
-          PropagateAtLaunch: true
-
-  GpuCapacityProvider:
-    Type: AWS::ECS::CapacityProvider
-    Properties:
-      Name: !Sub customer-ops-${Environment}-gpu
-      AutoScalingGroupProvider:
-        AutoScalingGroupArn: !Ref GpuAutoScalingGroup
-        ManagedScaling:
-          Status: ENABLED
-          TargetCapacity: 100
-          MinimumScalingStepSize: 1
-          MaximumScalingStepSize: 1
-        ManagedTerminationProtection: ENABLED
-
   ClusterCapacityProviderAssociations:
     Type: AWS::ECS::ClusterCapacityProviderAssociations
     Properties:
@@ -388,7 +301,6 @@ Resources:
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
-        - !Ref GpuCapacityProvider
       DefaultCapacityProviderStrategy:
         - CapacityProvider: FARGATE
           Weight: 1
@@ -484,14 +396,14 @@ Outputs:
     Value: !Ref ModelApiSecurityGroup
     Export:
       Name: !Sub customer-ops-${Environment}-model-api-sg
+  ModelServerSecurityGroupId:
+    Value: !Ref ModelServerSecurityGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-server-sg
   ClusterName:
     Value: !Ref EcsCluster
     Export:
       Name: !Sub customer-ops-${Environment}-cluster
-  GpuCapacityProviderName:
-    Value: !Ref GpuCapacityProvider
-    Export:
-      Name: !Sub customer-ops-${Environment}-gpu-capacity-provider
   ModelApiRepositoryUri:
     Value: !GetAtt ModelApiRepository.RepositoryUri
   ModelApiRepositoryName:

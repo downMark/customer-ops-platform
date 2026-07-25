@@ -129,7 +129,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push immutable GPU image
+      - name: Build and push immutable CPU image
         uses: docker/build-push-action@v6
         with:
           context: apps/model-server
