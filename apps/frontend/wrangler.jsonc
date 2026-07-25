@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "customer-ops-frontend",
+  "main": "./build/worker/worker.js",
+  "compatibility_date": "2026-07-23",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "assets": {
+    "directory": "./build/client"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "SSR_API_BASE_URL": "http://localhost:8080"
+  },
+  "env": {
+    "staging": {
+      "name": "customer-ops-frontend-staging",
+      "vars": {
+        "SSR_API_BASE_URL": "https://staging-api.example.com"
+      }
+    },
+    "production": {
+      "name": "customer-ops-frontend-production",
+      "vars": {
+        "SSR_API_BASE_URL": "https://api.example.com"
+      }
+    }
+  }
+}

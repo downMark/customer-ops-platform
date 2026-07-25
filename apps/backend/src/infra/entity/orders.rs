@@ -35,6 +35,7 @@ impl From<Model> for Order {
             tracking_number: m.tracking_number,
             estimated_delivery_at: m.estimated_delivery_at,
             updated_at: m.updated_at,
+            items: Vec::new(),
         }
     }
 }

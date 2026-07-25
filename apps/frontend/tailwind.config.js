@@ -1,4 +1,6 @@
 /** @type {import('tailwindcss').Config} */
+const animate = require("tailwindcss-animate");
+
 // Design tokens mirror ui/intelligent_service_core/DESIGN.md (Enterprise Blue / Inter).
 module.exports = {
   content: [
@@ -9,6 +11,30 @@ module.exports = {
   theme: {
     extend: {
       colors: {
+        border: "#c3c6d6",
+        input: "#c3c6d6",
+        ring: "#003d9b",
+        foreground: "#191c1e",
+        card: {
+          DEFAULT: "#ffffff",
+          foreground: "#191c1e",
+        },
+        popover: {
+          DEFAULT: "#ffffff",
+          foreground: "#191c1e",
+        },
+        muted: {
+          DEFAULT: "#f2f4f6",
+          foreground: "#434654",
+        },
+        accent: {
+          DEFAULT: "#d0e1fb",
+          foreground: "#191c1e",
+        },
+        destructive: {
+          DEFAULT: "#ba1a1a",
+          foreground: "#ffffff",
+        },
         "tertiary-container": "#00618b",
         "on-secondary-fixed-variant": "#38485d",
         "primary-fixed-dim": "#b2c5ff",
@@ -93,5 +119,5 @@ module.exports = {
       },
     },
   },
-  plugins: [],
+  plugins: [animate],
 };

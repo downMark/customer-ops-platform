@@ -38,7 +38,7 @@ impl GetOrder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::order::Order;
+    use crate::domain::order::{NewOrder, Order, OrderFilter};
     use crate::domain::repository::RepoError;
     use async_trait::async_trait;
     use chrono::Utc;
@@ -63,6 +63,20 @@ mod tests {
             }
             Ok(self.exists)
         }
+
+        async fn list_owned(
+            &self,
+            _user_id: &str,
+            _filter: &OrderFilter,
+            _offset: u64,
+            _limit: u64,
+        ) -> Result<(Vec<Order>, u64), RepoError> {
+            Ok((Vec::new(), 0))
+        }
+
+        async fn create_owned(&self, _user_id: &str, _order: &NewOrder) -> Result<bool, RepoError> {
+            Ok(true)
+        }
     }
 
     fn sample() -> Order {
@@ -74,12 +88,14 @@ mod tests {
             tracking_number: None,
             estimated_delivery_at: None,
             updated_at: Utc::now(),
+            items: vec![],
         }
     }
 
     fn auth() -> AuthUser {
         AuthUser {
             user_id: "test-user-1".into(),
+            role: "operator".into(),
         }
     }
 

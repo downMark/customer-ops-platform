@@ -7,6 +7,7 @@ use crate::domain::user::UserAccount;
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user_id: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

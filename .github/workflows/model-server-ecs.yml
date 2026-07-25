@@ -1,0 +1,150 @@
+name: Python Model Server - Amazon ECS
+
+on:
+  pull_request:
+    paths:
+      - "apps/model-server/**"
+      - ".github/workflows/model-server-ecs.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/model-server/**"
+      - ".github/workflows/model-server-ecs.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub Environment containing the AWS deployment configuration
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+
+concurrency:
+  group: model-server-${{ github.event_name == 'workflow_dispatch' && inputs.environment || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: apps/model-server
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.8.22"
+          enable-cache: true
+          cache-dependency-glob: apps/model-server/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Test
+        run: uv run pytest
+
+  deploy:
+    name: Deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      ECR_REPOSITORY: ${{ vars.MODEL_SERVER_ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.MODEL_SERVER_ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.MODEL_SERVER_ECS_SERVICE }}
+      ECS_CONTAINER_NAME: ${{ vars.MODEL_SERVER_ECS_CONTAINER_NAME }}
+      ECS_TASK_DEFINITION_FAMILY: ${{ vars.MODEL_SERVER_TASK_DEFINITION_FAMILY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate deployment configuration
+        run: |
+          : "${AWS_REGION:?Configure AWS_REGION in the GitHub Environment}"
+          : "${AWS_DEPLOY_ROLE_ARN:?Configure AWS_DEPLOY_ROLE_ARN in the GitHub Environment}"
+          : "${ECR_REPOSITORY:?Configure MODEL_SERVER_ECR_REPOSITORY in the GitHub Environment}"
+          : "${ECS_CLUSTER:?Configure MODEL_SERVER_ECS_CLUSTER in the GitHub Environment}"
+          : "${ECS_SERVICE:?Configure MODEL_SERVER_ECS_SERVICE in the GitHub Environment}"
+          : "${ECS_CONTAINER_NAME:?Configure MODEL_SERVER_ECS_CONTAINER_NAME in the GitHub Environment}"
+          : "${ECS_TASK_DEFINITION_FAMILY:?Configure MODEL_SERVER_TASK_DEFINITION_FAMILY in the GitHub Environment}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sign in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push immutable GPU image
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/model-server
+          file: apps/model-server/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha,scope=model-server
+          cache-to: type=gha,mode=max,scope=model-server
+
+      - name: Download active task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${ECS_TASK_DEFINITION_FAMILY}" \
+            --query taskDefinition \
+            > "${RUNNER_TEMP}/model-server-task-definition.json"
+
+      - name: Render image into task definition
+        id: task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ runner.temp }}/model-server-task-definition.json
+          container-name: ${{ env.ECS_CONTAINER_NAME }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Deploy task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "### Python model-server"
+            echo
+            echo "- Cluster/service: \`${ECS_CLUSTER}/${ECS_SERVICE}\`"
+            echo "- Image: \`${ECR_REPOSITORY}:${GITHUB_SHA}\`"
+            echo "- Exposure: private; ingress on port 8000 only from the Mastra task security group"
+            echo "- Model: downloaded at runtime from the task definition's \`MODEL_S3_URI\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

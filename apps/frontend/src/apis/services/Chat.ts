@@ -1,30 +1,14 @@
-import request from "apis";
 import AuthService from "./Auth";
 import { getModelApiBaseURL } from "../runtime";
 import {
   ChatStreamHandlers,
   ChatStreamPayload,
-  ChatView,
 } from "../model/chat";
 
-/**
- * Base URL of the model-api (Mastra) chat service. In dev this points at the
- * local model-api; the mock stream below runs when it is unreachable / disabled.
- */
-const useMockStream = () =>
-  typeof import.meta === "undefined" ||
-  import.meta.env?.VITE_USE_MOCK_STREAM !== "false";
-
 class ChatService {
-  /** Aggregate view for the Active Chats page (customer + order + messages). */
-  static getChatView(): Promise<ChatView> {
-    return request.get("/chat-view");
-  }
-
   /**
    * Stream an agent reply. Talks to model-api `POST /api/chat/stream` (SSE:
    * start → delta* → done | error). Falls back to a simulated local stream in
-   * dev so the UI is demonstrable without a running backend.
    * Returns a function that aborts the in-flight stream.
    */
   static streamMessage(
@@ -33,11 +17,7 @@ class ChatService {
   ): () => void {
     const controller = new AbortController();
 
-    if (useMockStream()) {
-      runMockStream(payload, handlers, controller.signal);
-    } else {
-      runSseStream(payload, handlers, controller.signal);
-    }
+    runSseStream(payload, handlers, controller.signal);
 
     return () => controller.abort();
   }
@@ -122,30 +102,5 @@ function dispatchSseFrame(frame: string, handlers: ChatStreamHandlers) {
     /* ignore malformed frame */
   }
 }
-
-/** Simulated token stream for local development without model-api. */
-async function runMockStream(
-  payload: ChatStreamPayload,
-  handlers: ChatStreamHandlers,
-  signal: AbortSignal
-) {
-  const reply =
-    `正在为 ${payload.orderId} 检索国际物流日志。已定位到您的包裹位于北京枢纽 (ZBAA)，` +
-    `目前正在进行常规出口清关。根据最新的遥测数据，预计将在 24 小时内完成清关并继续发往目的地。`;
-  const tokens = reply.match(/[一-龥]|\S+\s*/g) ?? [reply];
-
-  handlers.onStart?.(`trace_mock_${payload.conversationId}`);
-
-  for (const token of tokens) {
-    if (signal.aborted) return;
-    await delay(45);
-    if (signal.aborted) return;
-    handlers.onDelta?.(token);
-  }
-  handlers.onDone?.(payload.conversationId);
-}
-
-const delay = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export default ChatService;

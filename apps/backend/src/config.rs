@@ -10,6 +10,8 @@ pub struct Config {
     pub port: u16,
     pub db_max_connections: u32,
     pub db_connect_timeout_secs: u64,
+    /// 允许直接调用 Backend 的前端 Origin，逗号分隔。
+    pub cors_origins: Vec<String>,
     /// SNS Topic ARN；缺省则用 no-op 发布器（本地无 AWS）。
     pub sns_topic_arn: Option<String>,
 }
@@ -54,6 +56,13 @@ impl Config {
         let sns_topic_arn = env::var("SNS_TOPIC_ARN")
             .ok()
             .filter(|v| !v.trim().is_empty());
+        let cors_origins = env::var("CORS_ORIGINS")
+            .unwrap_or_else(|_| "http://localhost:3002".into())
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_owned)
+            .collect();
         Ok(Self {
             database_url,
             jwt_secret,
@@ -61,6 +70,7 @@ impl Config {
             port,
             db_max_connections,
             db_connect_timeout_secs,
+            cors_origins,
             sns_topic_arn,
         })
     }

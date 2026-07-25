@@ -60,6 +60,7 @@ impl TokenVerifier for JwtVerifier {
         }
         Ok(AuthUser {
             user_id: data.claims.sub,
+            role: data.claims.role.unwrap_or_default(),
         })
     }
 }

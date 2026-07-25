@@ -1,5 +1,5 @@
 //! customer-ops-backend 应用库。
-//! 提供可复用的应用与 Router 构造入口，供本地 Axum、测试及未来 Lambda 入口共享。
+//! 提供可复用的应用与 Router 构造入口，供本地 Axum、测试及 Lambda 入口共享。
 
 pub mod application;
 mod bootstrap;
@@ -31,11 +31,11 @@ pub enum StartupError {
 
 /// 使用真实基础设施构造完整应用。
 ///
-/// 数据库连接和迁移在此完成；返回的 Router 可由本地 TCP Server 或未来
+/// 数据库连接和迁移在此完成；返回的 Router 可由本地 TCP Server 或
 /// `lambda_http` 入口直接复用。
 pub async fn build_app(config: &Config) -> Result<Router, StartupError> {
     let state = bootstrap::build_state(config).await?;
-    Ok(router::build_router(state))
+    router::build_router_with_cors(state, &config.cors_origins)
 }
 
 /// 启动本地 Axum 服务。

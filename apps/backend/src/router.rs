@@ -2,9 +2,10 @@
 
 use std::time::Duration;
 
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
@@ -15,8 +16,48 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 构造不依赖具体运行时的应用 Router。
 pub fn build_router(state: AppState) -> Router {
+    build_base_router(state)
+}
+
+/// 构造带精确 Origin 白名单的生产 Router。
+pub fn build_router_with_cors(
+    state: AppState,
+    origins: &[String],
+) -> Result<Router, crate::StartupError> {
+    let allowed_origins = origins
+        .iter()
+        .map(|origin| {
+            HeaderValue::from_str(origin).map_err(|_| {
+                crate::StartupError::Config(crate::config::ConfigError::Invalid("CORS_ORIGINS"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let cors = CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::HeaderName::from_static("x-trace-id"),
+        ])
+        .expose_headers([header::HeaderName::from_static("x-trace-id")]);
+
+    Ok(build_base_router(state).layer(cors))
+}
+
+fn build_base_router(state: AppState) -> Router {
     Router::new()
         .route("/api/auth/login", post(handler::auth::login))
+        .route(
+            "/api/products",
+            get(handler::products::list).post(handler::products::create),
+        )
+        .route(
+            "/api/orders",
+            get(handler::orders::list_orders).post(handler::orders::create_order),
+        )
         .route("/api/orders/{order_id}", get(handler::orders::get_order))
         .route(
             "/api/conversations/{conversation_id}/complete",
@@ -46,8 +87,11 @@ mod tests {
 
     use super::*;
     use crate::application::complete_conversation::CompleteConversation;
+    use crate::application::create_order::CreateOrder;
     use crate::application::get_order::GetOrder;
+    use crate::application::list_orders::ListOrders;
     use crate::application::login::Login;
+    use crate::application::products::Products;
     use crate::domain::auth::{
         AuthError, AuthServiceError, AuthUser, IssuedToken, PasswordVerifier, TokenIssuer,
         TokenVerifier,
@@ -56,8 +100,9 @@ mod tests {
         ConversationCompletion, ConversationRepository, SaveOutcome,
     };
     use crate::domain::event::{ConversationCompleted, EventPublisher, PublishError};
-    use crate::domain::order::Order;
-    use crate::domain::repository::{OrderRepository, RepoError};
+    use crate::domain::order::{NewOrder, Order, OrderFilter, OrderItem};
+    use crate::domain::product::Product;
+    use crate::domain::repository::{OrderRepository, ProductRepository, RepoError};
     use crate::domain::user::{UserAccount, UserRepository};
 
     struct FakeOrderRepository;
@@ -69,15 +114,21 @@ mod tests {
             order_id: &str,
             user_id: &str,
         ) -> Result<Option<Order>, RepoError> {
-            let owned = (order_id == "COP-10086" && user_id == "test-user-1")
+            let owned = (matches!(order_id, "COP-10086" | "ORD-2026-0001")
+                && user_id == "test-user-1")
                 || (order_id == "ADMIN-2026-0001" && user_id == "test-operator");
             if !owned {
                 return Ok(None);
             }
+            let (status, status_text) = if order_id == "ORD-2026-0001" {
+                ("pending_payment", "待付款")
+            } else {
+                ("shipped", "已发货")
+            };
             Ok(Some(Order {
                 order_id: order_id.to_string(),
-                status: "shipped".into(),
-                status_text: "已发货".into(),
+                status: status.into(),
+                status_text: status_text.into(),
                 carrier: None,
                 tracking_number: None,
                 estimated_delivery_at: None,
@@ -85,11 +136,45 @@ mod tests {
                     .with_ymd_and_hms(2026, 7, 22, 12, 0, 0)
                     .single()
                     .expect("valid test timestamp"),
+                items: vec![OrderItem {
+                    product_id: "PROD-001".into(),
+                    product_name: "演示商品".into(),
+                    unit_price_cents: 19_900,
+                    quantity: 1,
+                    subtotal_cents: 19_900,
+                }],
             }))
         }
 
         async fn exists(&self, order_id: &str) -> Result<bool, RepoError> {
             Ok(matches!(order_id, "COP-10086" | "ADMIN-2026-0001"))
+        }
+
+        async fn list_owned(
+            &self,
+            user_id: &str,
+            _filter: &OrderFilter,
+            _offset: u64,
+            _limit: u64,
+        ) -> Result<(Vec<Order>, u64), RepoError> {
+            let order = self.find_owned("COP-10086", user_id).await?;
+            let items = order.into_iter().collect::<Vec<_>>();
+            let total = items.len() as u64;
+            Ok((items, total))
+        }
+
+        async fn create_owned(&self, _user_id: &str, order: &NewOrder) -> Result<bool, RepoError> {
+            if order.items.iter().any(|item| item.product_id == "PROD-OOS") {
+                return Err(RepoError::InsufficientStock);
+            }
+            if order
+                .items
+                .iter()
+                .any(|item| item.product_id == "PROD-MISSING")
+            {
+                return Err(RepoError::InvalidReference);
+            }
+            Ok(true)
         }
     }
 
@@ -121,14 +206,50 @@ mod tests {
             if bearer_token == "valid-token" {
                 Ok(AuthUser {
                     user_id: "test-user-1".into(),
+                    role: "operator".into(),
                 })
             } else if bearer_token == "operator-token" {
                 Ok(AuthUser {
                     user_id: "test-operator".into(),
+                    role: "operator".into(),
+                })
+            } else if bearer_token == "admin-token" {
+                Ok(AuthUser {
+                    user_id: "test-admin".into(),
+                    role: "admin".into(),
                 })
             } else {
                 Err(AuthError::InvalidToken)
             }
+        }
+    }
+    struct FakeProductRepository;
+    #[async_trait]
+    impl ProductRepository for FakeProductRepository {
+        async fn list(
+            &self,
+            _: Option<&str>,
+            _: Option<bool>,
+            _: u64,
+            _: u64,
+        ) -> Result<(Vec<Product>, u64), RepoError> {
+            let now = Utc::now();
+            Ok((
+                vec![Product {
+                    product_id: "PROD-001".into(),
+                    name: "演示商品".into(),
+                    price_cents: 19_900,
+                    stock_quantity: 100,
+                    is_active: true,
+                    created_at: now,
+                    updated_at: now,
+                }],
+                1,
+            ))
+        }
+
+        async fn create(&self, product: &Product) -> Result<bool, RepoError> {
+            Ok(product.product_id != "PROD-DUP")
         }
     }
 
@@ -167,8 +288,11 @@ mod tests {
     }
 
     fn test_router() -> Router {
+        let order_repo = Arc::new(FakeOrderRepository);
         build_router(AppState::new(
-            Arc::new(GetOrder::new(Arc::new(FakeOrderRepository))),
+            Arc::new(GetOrder::new(order_repo.clone())),
+            Arc::new(ListOrders::new(order_repo.clone())),
+            Arc::new(CreateOrder::new(order_repo)),
             Arc::new(CompleteConversation::new(
                 Arc::new(FakeConversationRepository),
                 Arc::new(FakePublisher),
@@ -179,6 +303,7 @@ mod tests {
                 Arc::new(FakeTokenIssuer),
             )),
             Arc::new(FakeVerifier),
+            Arc::new(Products::new(Arc::new(FakeProductRepository))),
         ))
     }
 
@@ -247,6 +372,209 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["data"]["orderId"], "COP-10086");
         assert_eq!(body["data"]["statusText"], "已发货");
+        assert_eq!(body["data"]["productSummary"], "演示商品 ×1");
+        assert_eq!(body["data"]["totalAmountCents"], 19_900);
+    }
+
+    #[tokio::test]
+    async fn order_list_route_returns_paginated_data() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orders?page=1&pageSize=10&status=shipped")
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["total"], 1);
+        assert_eq!(body["data"]["page"], 1);
+        assert_eq!(body["data"]["items"][0]["orderId"], "COP-10086");
+    }
+
+    #[tokio::test]
+    async fn create_order_route_returns_created_order() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/orders")
+                    .header("authorization", "Bearer valid-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "orderId": "ORD-2026-0001",
+                            "status": "pending_payment",
+                            "items": [{"productId":"PROD-001","quantity":1}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["orderId"], "ORD-2026-0001");
+        assert_eq!(body["data"]["statusText"], "待付款");
+        assert_eq!(body["data"]["items"][0]["productId"], "PROD-001");
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_duplicate_products() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/orders")
+                    .header("authorization", "Bearer valid-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "orderId": "ORD-DUPLICATE",
+                            "status": "pending_payment",
+                            "items": [
+                                {"productId":"PROD-001","quantity":1},
+                                {"productId":"prod-001","quantity":2}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["code"], 40903);
+    }
+
+    #[tokio::test]
+    async fn create_order_maps_product_and_inventory_errors() {
+        for (product_id, expected_status, expected_code) in [
+            ("PROD-MISSING", StatusCode::BAD_REQUEST, 40002),
+            ("PROD-OOS", StatusCode::CONFLICT, 40902),
+        ] {
+            let response = test_router()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/orders")
+                        .header("authorization", "Bearer valid-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "orderId": format!("ORD-{product_id}"),
+                                "status": "pending_payment",
+                                "items": [{"productId":product_id,"quantity":1}]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(json_body(response).await["code"], expected_code);
+        }
+    }
+
+    #[tokio::test]
+    async fn products_route_returns_paginated_products() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/products?page=1&pageSize=20&active=true")
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["total"], 1);
+        assert_eq!(body["data"]["items"][0]["productId"], "PROD-001");
+        assert_eq!(body["data"]["items"][0]["priceCents"], 19_900);
+    }
+
+    #[tokio::test]
+    async fn create_product_requires_admin_role() {
+        let request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/products")
+                .header("authorization", "Bearer valid-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "productId": "PROD-NEW",
+                        "name": "新商品",
+                        "priceCents": 9900,
+                        "stockQuantity": 20
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let response = test_router().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(response).await["code"], 40302);
+
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/products")
+                    .header("authorization", "Bearer admin-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "productId": "PROD-NEW",
+                            "name": "新商品",
+                            "priceCents": 9900,
+                            "stockQuantity": 20
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["data"]["productId"], "PROD-NEW");
+    }
+
+    #[tokio::test]
+    async fn create_product_rejects_duplicate_product_id() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/products")
+                    .header("authorization", "Bearer admin-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "productId": "PROD-DUP",
+                            "name": "重复商品",
+                            "priceCents": 9900,
+                            "stockQuantity": 20
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["code"], 40903);
     }
 
     #[tokio::test]

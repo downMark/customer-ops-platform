@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { createServerApp } from "./index";
 import type { ViteManifest } from "./assets";
 import { defaultPort } from "../../config/constants";
-import { clientBuildPath } from "../../config/paths";
 
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT ?? defaultPort);
@@ -21,7 +20,8 @@ const createApp = async () => {
     return createServerApp({ vite }).app;
   }
 
-  const clientRoot = path.resolve(clientBuildPath);
+  // This file is emitted to build/server; client assets are a sibling tree.
+  const clientRoot = path.resolve(__dirname, "../client/static");
   const manifestPath = path.resolve(clientRoot, ".vite/manifest.json");
   const manifest = JSON.parse(
     await readFile(manifestPath, "utf-8")

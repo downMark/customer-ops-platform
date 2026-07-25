@@ -64,3 +64,21 @@ corepack pnpm typecheck
 corepack pnpm test
 corepack pnpm build
 ```
+
+## AWS 部署
+
+生产镜像由 `Dockerfile` 构建，监听 `0.0.0.0:4111`。服务部署到 ECS 后通过
+公网 HTTPS ALB 提供给前端，ALB 的 4111 端口只转发到 Mastra Task
+Security Group。
+
+Task Definition 必须配置：
+
+- `MODEL_SERVER_BASE_URL`：私有 Python model-server 地址，例如
+  `http://model-server.internal:8000/v1`。
+- `MODEL_SERVER_API_KEY`：从 Secrets Manager 注入，必须与 Python 服务一致。
+- `BACKEND_BASE_URL`：Backend Lambda 的 API Gateway 地址。
+- `CORS_ORIGINS`：仅包含实际 Cloudflare 前端域名。
+
+提交 `apps/model-api/**` 到 `main` 后，
+`.github/workflows/model-api-ecs.yml` 会构建不可变 SHA 镜像、推送 ECR，
+并滚动更新已有 ECS Service。Pull Request 只执行类型检查、测试和构建。

@@ -18,6 +18,7 @@
         "noFallthroughCasesInSwitch": true,
         "downlevelIteration": true,
         "paths": {
+            "@/*": ["./*"],
             "@app/*": ["../app/*"]
         },
     },

@@ -7,5 +7,6 @@ pub mod error;
 pub mod jwt;
 pub mod order_repo;
 pub mod password;
+pub mod product_repo;
 pub mod sns;
 pub mod user_repo;

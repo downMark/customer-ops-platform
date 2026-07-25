@@ -9,6 +9,11 @@ pub enum ApplicationError {
     InvalidRequest,
     Forbidden,
     NotFound,
+    Conflict,
+    ProductUnavailable,
+    InsufficientStock,
+    ProductConflict,
+    AdminRequired,
     ServiceUnavailable,
     Internal(String),
 }
@@ -18,6 +23,8 @@ impl From<RepoError> for ApplicationError {
         match error {
             RepoError::Unavailable => Self::ServiceUnavailable,
             RepoError::Other(detail) => Self::Internal(detail),
+            RepoError::InvalidReference => Self::ProductUnavailable,
+            RepoError::InsufficientStock => Self::InsufficientStock,
         }
     }
 }

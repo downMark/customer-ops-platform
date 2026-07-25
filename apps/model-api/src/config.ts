@@ -11,7 +11,7 @@ const envSchema = z.object({
   MODEL_TIMEOUT_MS: positiveInteger.default(120_000),
   CORS_ORIGINS: z
     .string()
-    .default("http://localhost:3002,http://localhost:3000"),
+    .default("http://localhost:3002"),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -64,7 +64,7 @@ def test_health_and_model_metadata() -> None:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["model"] == "customer-ops"
-        assert health.json()["modelPath"].endswith("customer-ops-q4_k_m.gguf")
+        assert "modelPath" not in health.json()
 
         models = client.get(
             "/v1/models", headers={"Authorization": "Bearer test-key"}

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { PrefetchKeys } from "apis/queryKeys";
+import { useOutletContext } from "react-router-dom";
 import ChatService from "apis/services/Chat";
-import AuthService from "apis/services/Auth";
-import { AuthSession } from "apis/model/auth";
+import OrderService from "apis/services/Order";
 import { extractOrderId } from "apis/orderId";
 import { ChatMessage } from "apis/model/chat";
 import Icon from "components/Icon";
+import { AppOutletContext } from "components/layout/AppShell";
 import OrderContextPanel from "./OrderContextPanel";
 
 let messageSeq = 0;
@@ -20,11 +20,11 @@ const formatNow = () => {
 };
 
 const CustomerBubble = ({ message }: { message: ChatMessage }) => (
-  <div className="flex items-start gap-4 max-w-2xl ml-auto flex-row-reverse">
-    <div className="w-8 h-8 rounded-full bg-surface-container-high flex-shrink-0 flex items-center justify-center">
+  <div className="ml-auto flex max-w-[92%] flex-row-reverse items-start gap-2 sm:max-w-2xl sm:gap-4">
+    <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-surface-container-high">
       <Icon name="person" className="text-sm" />
     </div>
-    <div className="bg-surface-container-low p-4 rounded-2xl rounded-tr-none">
+    <div className="min-w-0 rounded-2xl rounded-tr-none bg-surface-container-low p-3 sm:p-4">
       <p className="text-body-md text-on-surface whitespace-pre-wrap">
         {message.text}
       </p>
@@ -36,12 +36,12 @@ const CustomerBubble = ({ message }: { message: ChatMessage }) => (
 );
 
 const AgentBubble = ({ message }: { message: ChatMessage }) => (
-  <div className="flex items-start gap-4 max-w-2xl">
-    <div className="w-8 h-8 rounded-full bg-primary flex-shrink-0 flex items-center justify-center text-white">
+  <div className="flex max-w-[92%] items-start gap-2 sm:max-w-2xl sm:gap-4">
+    <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary text-white">
       <Icon name="smart_toy" className="text-sm" filled />
     </div>
     <div
-      className={`p-4 rounded-2xl rounded-tl-none shadow-md ${
+      className={`min-w-0 rounded-2xl rounded-tl-none p-3 shadow-md sm:p-4 ${
         message.error
           ? "bg-error-container text-on-error-container"
           : "bg-primary text-white"
@@ -49,7 +49,7 @@ const AgentBubble = ({ message }: { message: ChatMessage }) => (
     >
       <div className="flex items-center gap-2 mb-2">
         <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
-          AI 客服（Mastra 运营）
+          智能客服
         </span>
         {message.streaming && (
           <span className="text-[10px] bg-white/20 px-2 py-0.5 rounded-full streaming-dots">
@@ -66,51 +66,41 @@ const AgentBubble = ({ message }: { message: ChatMessage }) => (
 );
 
 const ActiveChat = () => {
-  const { data: view } = useQuery({
-    queryKey: [PrefetchKeys.CHAT_VIEW],
-    queryFn: () => ChatService.getChatView(),
-  });
-
+  const { session } = useOutletContext<AppOutletContext>();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeOrderId, setActiveOrderId] = useState("");
-  const [session, setSession] = useState<AuthSession | null>(null);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [loginError, setLoginError] = useState("");
-  const [loggingIn, setLoggingIn] = useState(false);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
-  const seededRef = useRef(false);
+  const [mobileOrderOpen, setMobileOrderOpen] = useState(false);
+  const conversationIdRef = useRef(
+    `conv_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+  );
   const abortRef = useRef<(() => void) | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    setSession(AuthService.getSession());
-  }, []);
-
-  // Seed local message list from the prefetched view exactly once.
-  useEffect(() => {
-    if (view && !seededRef.current) {
-      setMessages(view.messages);
-      setActiveOrderId(view.orderId);
-      seededRef.current = true;
-    }
-  }, [view]);
+  const { data: backendOrder, error: orderError } = useQuery({
+    queryKey: ["order", activeOrderId],
+    queryFn: () => OrderService.getOrder(activeOrderId),
+    enabled: Boolean(session && activeOrderId),
+    retry: false,
+  });
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  useEffect(() => () => abortRef.current?.(), []);
+
   const patchMessage = (id: string, patch: Partial<ChatMessage>) =>
     setMessages((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, ...patch } : m))
+      prev.map((m) => (m.id === id ? { ...m, ...patch } : m)),
     );
 
   const handleSend = () => {
     const text = input.trim();
-    if (!text || streaming || !view) return;
+    if (!text || streaming || !session) return;
     const mentionedOrderId = extractOrderId(text);
-    const requestOrderId = mentionedOrderId || activeOrderId || view.orderId;
+    const requestOrderId = mentionedOrderId || activeOrderId;
     if (mentionedOrderId) {
       setActiveOrderId(mentionedOrderId);
     }
@@ -131,11 +121,21 @@ const ActiveChat = () => {
     };
     setMessages((prev) => [...prev, customer, agent]);
     setInput("");
+
+    if (!requestOrderId) {
+      patchMessage(agentId, {
+        streaming: false,
+        error: true,
+        text: "请在消息中提供订单号，例如 ORD-2026-0001。",
+      });
+      return;
+    }
+
     setStreaming(true);
 
     abortRef.current = ChatService.streamMessage(
       {
-        conversationId: view.conversationId,
+        conversationId: conversationIdRef.current,
         orderId: requestOrderId,
         message: text,
       },
@@ -143,8 +143,8 @@ const ActiveChat = () => {
         onDelta: (chunk) =>
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === agentId ? { ...m, text: m.text + chunk } : m
-            )
+              m.id === agentId ? { ...m, text: m.text + chunk } : m,
+            ),
           ),
         onDone: () => {
           patchMessage(agentId, { streaming: false });
@@ -155,12 +155,12 @@ const ActiveChat = () => {
           patchMessage(agentId, {
             streaming: false,
             error: true,
-            text: `⚠ ${err.message}${err.traceId ? `（trace ${err.traceId}）` : ""}`,
+            text: `⚠ ${err.message}${err.traceId ? `（追踪号 ${err.traceId}）` : ""}`,
           });
           setStreaming(false);
           abortRef.current = null;
         },
-      }
+      },
     );
   };
 
@@ -169,7 +169,7 @@ const ActiveChat = () => {
     abortRef.current = null;
     setStreaming(false);
     setMessages((prev) =>
-      prev.map((m) => (m.streaming ? { ...m, streaming: false } : m))
+      prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
     );
   };
 
@@ -180,168 +180,139 @@ const ActiveChat = () => {
     }
   };
 
-  const handleLogin = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (loggingIn) return;
-    setLoggingIn(true);
-    setLoginError("");
-    try {
-      setSession(await AuthService.login(username.trim(), password));
-      setPassword("");
-    } catch (error) {
-      setLoginError((error as Error).message);
-    } finally {
-      setLoggingIn(false);
-    }
-  };
-
-  const handleLogout = () => {
-    abortRef.current?.();
-    AuthService.clearSession();
-    setSession(null);
-  };
-
-  if (!session) {
-    return (
-      <div className="h-full flex items-center justify-center bg-surface-container-low p-6">
-        <form
-          onSubmit={handleLogin}
-          className="w-full max-w-md rounded-2xl bg-white border border-outline-variant p-8 shadow-lg"
-        >
-          <div className="w-12 h-12 rounded-xl bg-primary text-white flex items-center justify-center mb-5">
-            <Icon name="support_agent" filled />
-          </div>
-          <h1 className="text-2xl font-bold text-on-surface">登录客服控制台</h1>
-          <p className="text-sm text-on-surface-variant mt-2 mb-6">
-            登录后，Mastra 会使用您的身份向订单服务查询数据。
-          </p>
-          <label className="block text-sm font-medium text-on-surface mb-2">
-            用户名
-          </label>
-          <input
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            autoComplete="username"
-            className="w-full border border-outline-variant rounded-xl px-4 py-3 outline-none focus:border-primary focus:ring-2 focus:ring-primary/10"
-          />
-          <label className="block text-sm font-medium text-on-surface mt-4 mb-2">
-            密码
-          </label>
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-            className="w-full border border-outline-variant rounded-xl px-4 py-3 outline-none focus:border-primary focus:ring-2 focus:ring-primary/10"
-          />
-          {loginError && (
-            <p className="mt-3 text-sm text-error" role="alert">
-              {loginError}
-            </p>
-          )}
-          <button
-            type="submit"
-            disabled={loggingIn || !username.trim() || !password}
-            className="mt-6 w-full rounded-xl bg-primary text-white py-3 font-bold disabled:opacity-50"
-          >
-            {loggingIn ? "正在登录…" : "登录"}
-          </button>
-        </form>
-      </div>
-    );
-  }
-
   return (
     <div className="h-full flex overflow-hidden">
       {/* Left: messaging */}
       <section className="flex-1 flex flex-col bg-white relative min-w-0">
         {/* Chat header */}
-        <div className="p-gutter border-b border-outline-variant flex justify-between items-center shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-primary-container flex items-center justify-center text-on-primary">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-outline-variant p-3 sm:gap-4 sm:p-gutter">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-container text-on-primary sm:h-10 sm:w-10">
               <Icon name="person" />
             </div>
-            <div>
-              <h2 className="font-bold text-body-lg">
-                客户：{view?.customer.name ?? "—"}
+            <div className="min-w-0">
+              <h2 className="truncate text-sm font-bold sm:text-body-lg">
+                客户：{session.user.username}
               </h2>
               <p className="text-label-sm text-on-surface-variant flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-green-500" /> 自
-                {view?.customer.activeSince ?? "—"} 起在线
+                <span className="w-2 h-2 rounded-full bg-green-500" /> 当前在线
               </p>
             </div>
           </div>
-          <span className="px-3 py-1 bg-secondary-container text-on-secondary-container rounded-full text-label-sm font-bold flex items-center gap-1">
-            <Icon name="receipt_long" className="text-[16px]" />
-            订单 #{activeOrderId || view?.orderId || "—"}
-          </span>
           <button
             type="button"
-            onClick={handleLogout}
-            className="text-sm text-on-surface-variant hover:text-primary"
+            disabled={!activeOrderId}
+            onClick={() => setMobileOrderOpen(true)}
+            className="flex max-w-[46%] items-center gap-1 rounded-full bg-secondary-container px-2 py-1 text-label-sm font-bold text-on-secondary-container disabled:opacity-60 sm:max-w-none sm:px-3 lg:cursor-default"
           >
-            退出 {session.user.username}
+            <Icon name="receipt_long" className="text-[16px]" />
+            <span className="truncate">订单 #{activeOrderId || "—"}</span>
           </button>
+          <span className="hidden text-sm text-on-surface-variant xl:block">
+            {session.user.username}
+          </span>
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-gutter space-y-6">
+        <div
+          ref={scrollRef}
+          className="flex-1 space-y-4 overflow-y-auto p-3 sm:space-y-6 sm:p-gutter"
+        >
           {messages.map((m) =>
             m.role === "customer" ? (
               <CustomerBubble key={m.id} message={m} />
             ) : (
               <AgentBubble key={m.id} message={m} />
-            )
+            ),
           )}
         </div>
 
         {/* Input */}
-        <div className="p-gutter border-t border-outline-variant bg-white shrink-0">
-          <div className="relative flex items-center">
+        <div className="shrink-0 border-t border-outline-variant bg-white p-3 sm:p-gutter">
+          <div className="flex items-center gap-2">
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="输入消息，或使用 /cmd 执行客服操作…"
-              className="w-full border border-outline-variant rounded-xl py-4 pl-4 pr-40 focus:ring-2 focus:ring-primary/10 focus:border-primary transition-all outline-none"
+              placeholder="输入消息，请包含需要查询的订单号…"
+              className="min-w-0 flex-1 rounded-xl border border-outline-variant px-3 py-3 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10 sm:px-4 sm:py-4"
             />
-            <div className="absolute right-3 flex items-center gap-2">
+            <button
+              type="button"
+              className="hidden p-2 text-on-surface-variant transition-colors hover:text-primary sm:block"
+              aria-label="添加附件"
+            >
+              <Icon name="attach_file" />
+            </button>
+            {streaming ? (
               <button
                 type="button"
-                className="p-2 text-on-surface-variant hover:text-primary transition-colors"
-                aria-label="添加附件"
+                onClick={handleStop}
+                className="flex h-11 shrink-0 items-center gap-1 rounded-lg bg-error px-3 font-bold text-white shadow-sm transition-all hover:opacity-90 sm:px-4"
               >
-                <Icon name="attach_file" />
+                <span className="hidden sm:inline">停止</span>
+                <Icon name="stop_circle" className="text-sm" />
               </button>
-              {streaming ? (
-                <button
-                  type="button"
-                  onClick={handleStop}
-                  className="bg-error text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:opacity-90 transition-all shadow-sm"
-                >
-                  <span>停止</span>
-                  <Icon name="stop_circle" className="text-sm" />
-                </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleSend}
+                className="flex h-11 shrink-0 items-center gap-1 rounded-lg bg-primary px-3 font-bold text-white shadow-sm transition-colors hover:bg-primary-container sm:px-4"
+                aria-label="发送消息"
+              >
+                <span className="hidden sm:inline">发送</span>
+                <Icon name="send" className="text-sm" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {mobileOrderOpen && activeOrderId && (
+          <div className="absolute inset-0 z-30 flex flex-col bg-white lg:hidden">
+            <div className="flex h-14 shrink-0 items-center justify-between border-b border-outline-variant px-4">
+              <div>
+                <p className="text-xs font-bold text-primary">订单详情</p>
+                <p className="max-w-[250px] truncate text-sm font-semibold">
+                  {activeOrderId}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileOrderOpen(false)}
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-surface-container"
+                aria-label="关闭订单详情"
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1">
+              {backendOrder ? (
+                <OrderContextPanel order={backendOrder} mobile />
               ) : (
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  className="bg-primary text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-primary-container transition-colors shadow-sm"
-                >
-                  <span>发送</span>
-                  <Icon name="send" className="text-sm" />
-                </button>
+                <div className="p-5 text-sm text-on-surface-variant">
+                  {orderError
+                    ? (orderError as Error).message
+                    : `正在加载订单 ${activeOrderId}…`}
+                </div>
               )}
             </div>
           </div>
-        </div>
+        )}
       </section>
 
-      {/* Right: order context (hidden on small screens) */}
-      {view && (activeOrderId || view.orderId) === view.orderId && (
-        <div className="hidden pad:flex pc:flex">
-          <OrderContextPanel order={view.order} />
+      {/* Right: order context */}
+      {session && activeOrderId && (
+        <div className="hidden lg:flex">
+          {backendOrder ? (
+            <OrderContextPanel order={backendOrder} />
+          ) : (
+            <aside className="w-80 lg:w-96 border-l border-outline-variant bg-surface-container-lowest p-6 text-sm text-on-surface-variant">
+              {orderError
+                ? (orderError as Error).message
+                : `正在加载订单 ${activeOrderId}…`}
+            </aside>
+          )}
         </div>
       )}
     </div>

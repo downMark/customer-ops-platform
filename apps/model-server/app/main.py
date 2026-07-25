@@ -49,7 +49,6 @@ def create_app(
         return {
             "status": "ok",
             "model": app_settings.model_alias,
-            "modelPath": str(app_settings.model_path),
         }
 
     @app.get("/v1/models", dependencies=[Depends(require_api_key)])

@@ -48,6 +48,12 @@ pub enum AppError {
     Forbidden,
     /// 订单不存在。
     NotFound,
+    /// 唯一资源已经存在。
+    Conflict,
+    ProductUnavailable,
+    InsufficientStock,
+    ProductConflict,
+    AdminRequired,
     /// 数据库/上游不可用或超时（不猜测订单状态）。
     ServiceUnavailable,
     /// 未预期的内部错误；detail 只进日志，不返回客户端。
@@ -61,6 +67,11 @@ impl AppError {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, 40101, "未授权"),
             AppError::Forbidden => (StatusCode::FORBIDDEN, 40301, "无权访问该订单"),
             AppError::NotFound => (StatusCode::NOT_FOUND, 40401, "订单不存在"),
+            AppError::Conflict => (StatusCode::CONFLICT, 40901, "订单号已存在"),
+            AppError::ProductUnavailable => (StatusCode::BAD_REQUEST, 40002, "商品不存在或已停用"),
+            AppError::InsufficientStock => (StatusCode::CONFLICT, 40902, "商品库存不足"),
+            AppError::ProductConflict => (StatusCode::CONFLICT, 40903, "商品编号已存在"),
+            AppError::AdminRequired => (StatusCode::FORBIDDEN, 40302, "仅管理员可执行该操作"),
             AppError::ServiceUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, 50301, "订单服务暂时不可用")
             }
@@ -85,6 +96,11 @@ impl From<ApplicationError> for AppError {
             ApplicationError::InvalidRequest => Self::InvalidRequest,
             ApplicationError::Forbidden => Self::Forbidden,
             ApplicationError::NotFound => Self::NotFound,
+            ApplicationError::Conflict => Self::Conflict,
+            ApplicationError::ProductUnavailable => Self::ProductUnavailable,
+            ApplicationError::InsufficientStock => Self::InsufficientStock,
+            ApplicationError::ProductConflict => Self::ProductConflict,
+            ApplicationError::AdminRequired => Self::AdminRequired,
             ApplicationError::ServiceUnavailable => Self::ServiceUnavailable,
             ApplicationError::Internal(detail) => Self::Internal(detail),
         }
@@ -121,6 +137,7 @@ mod tests {
             (AppError::Unauthorized, StatusCode::UNAUTHORIZED, 40101),
             (AppError::Forbidden, StatusCode::FORBIDDEN, 40301),
             (AppError::NotFound, StatusCode::NOT_FOUND, 40401),
+            (AppError::Conflict, StatusCode::CONFLICT, 40901),
             (
                 AppError::ServiceUnavailable,
                 StatusCode::SERVICE_UNAVAILABLE,

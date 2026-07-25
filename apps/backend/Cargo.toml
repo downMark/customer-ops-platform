@@ -2,6 +2,7 @@
 name = "customer-ops-backend"
 version = "0.1.0"
 edition = "2021"
+default-run = "backend"
 
 [dependencies]
 axum = "0.8"
@@ -28,6 +29,7 @@ argon2 = "0.5"
 dotenvy = "0.15"
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
+lambda_http = { version = "1.2", optional = true }
 # AWS SDK 仅在启用 `sns` feature 时编译（其最新版要求 rustc ≥ 1.94.1）。
 # 本地默认用 NoopPublisher，无需 AWS 依赖；部署环境用 `--features sns` 打开真实 SNS。
 aws-config = { version = "1", features = [
@@ -38,7 +40,25 @@ aws-sdk-sns = { version = "1", optional = true }
 [features]
 default = []
 sns = ["dep:aws-config", "dep:aws-sdk-sns"]
+lambda = ["dep:lambda_http"]
+
+[[bin]]
+name = "backend"
+path = "src/main.rs"
+
+[[bin]]
+name = "lambda"
+path = "src/bin/lambda.rs"
+required-features = ["lambda"]
 
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+
+# 项目位于外接磁盘；该文件系统不支持 Cargo 增量缓存依赖的硬链接。
+# 关闭本地开发/测试增量编译，避免 cached cgu 缺少 object file。
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false

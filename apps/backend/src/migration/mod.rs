@@ -6,6 +6,7 @@ mod m20260722_000001_create_orders;
 mod m20260722_000002_create_conversation_completions;
 mod m20260723_000003_create_users;
 mod m20260723_000004_seed_admin_orders;
+mod m20260725_000005_create_products_and_order_items;
 
 pub struct Migrator;
 
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260722_000002_create_conversation_completions::Migration),
             Box::new(m20260723_000003_create_users::Migration),
             Box::new(m20260723_000004_seed_admin_orders::Migration),
+            Box::new(m20260725_000005_create_products_and_order_items::Migration),
         ]
     }
 }

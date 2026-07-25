@@ -1,18 +1,15 @@
 import { lazy } from "react";
 import Index from "pages/index";
 import { PreFetchRouteObject } from "@app/utils/routesTypes";
-import { PrefetchKeys } from "apis/queryKeys";
-import ChatService from "apis/services/Chat";
-import SystemService from "apis/services/System";
 
 const ActiveChat = lazy(() => import("pages/ActiveChat"));
-const SystemSettings = lazy(() => import("pages/SystemSettings"));
-const OrderHistory = lazy(() => import("pages/OrderHistory"));
+const Orders = lazy(() => import("pages/Orders"));
+const CreateOrder = lazy(() => import("pages/CreateOrder"));
+const Products = lazy(() => import("pages/Products"));
+const CreateProduct = lazy(() => import("pages/CreateProduct"));
 
 const chatRoute = {
   element: <ActiveChat />,
-  queryKey: [PrefetchKeys.CHAT_VIEW],
-  loadData: ChatService.getChatView,
 };
 
 const routes: PreFetchRouteObject[] = [
@@ -22,13 +19,10 @@ const routes: PreFetchRouteObject[] = [
     children: [
       { index: true, ...chatRoute },
       { path: "chat", ...chatRoute },
-      {
-        path: "settings",
-        element: <SystemSettings />,
-        queryKey: [PrefetchKeys.SETTINGS_VIEW],
-        loadData: SystemService.getSettingsView,
-      },
-      { path: "history", element: <OrderHistory /> },
+      { path: "orders", element: <Orders /> },
+      { path: "addOrder", element: <CreateOrder /> },
+      { path: "products", element: <Products /> },
+      { path: "products/new", element: <CreateProduct /> },
     ],
   },
 ];

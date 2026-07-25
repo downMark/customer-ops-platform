@@ -1,5 +1,3 @@
-import { OrderContext } from "./order";
-
 export type MessageRole = "customer" | "agent";
 
 export interface ChatMessage {
@@ -9,19 +7,6 @@ export interface ChatMessage {
   time: string; // display string, e.g. "14:22 PM"
   streaming?: boolean;
   error?: boolean;
-}
-
-export interface Customer {
-  name: string;
-  activeSince: string; // e.g. "14:20"
-}
-
-export interface ChatView {
-  conversationId: string;
-  customer: Customer;
-  orderId: string;
-  order: OrderContext;
-  messages: ChatMessage[];
 }
 
 export interface ChatStreamPayload {

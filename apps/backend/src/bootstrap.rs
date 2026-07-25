@@ -5,8 +5,11 @@ use std::sync::Arc;
 use sea_orm_migration::MigratorTrait;
 
 use crate::application::complete_conversation::CompleteConversation;
+use crate::application::create_order::CreateOrder;
 use crate::application::get_order::GetOrder;
+use crate::application::list_orders::ListOrders;
 use crate::application::login::Login;
+use crate::application::products::Products;
 use crate::config::Config;
 use crate::domain::event::EventPublisher;
 use crate::infra::conversation_repo::SeaOrmConversationRepository;
@@ -14,6 +17,7 @@ use crate::infra::db;
 use crate::infra::jwt::JwtVerifier;
 use crate::infra::order_repo::SeaOrmOrderRepository;
 use crate::infra::password::Argon2PasswordVerifier;
+use crate::infra::product_repo::SeaOrmProductRepository;
 use crate::infra::sns::NoopPublisher;
 use crate::infra::user_repo::SeaOrmUserRepository;
 use crate::migration::Migrator;
@@ -26,14 +30,17 @@ pub(crate) async fn build_state(config: &Config) -> Result<AppState, StartupErro
 
     let order_repo = Arc::new(SeaOrmOrderRepository::new(connection.clone()));
     let conversation_repo = Arc::new(SeaOrmConversationRepository::new(connection.clone()));
-    let user_repo = Arc::new(SeaOrmUserRepository::new(connection));
+    let user_repo = Arc::new(SeaOrmUserRepository::new(connection.clone()));
+    let product_repo = Arc::new(SeaOrmProductRepository::new(connection));
     let jwt = Arc::new(JwtVerifier::with_ttl(
         &config.jwt_secret,
         config.jwt_ttl_seconds,
     ));
 
     Ok(AppState::new(
-        Arc::new(GetOrder::new(order_repo)),
+        Arc::new(GetOrder::new(order_repo.clone())),
+        Arc::new(ListOrders::new(order_repo.clone())),
+        Arc::new(CreateOrder::new(order_repo)),
         Arc::new(CompleteConversation::new(
             conversation_repo,
             build_publisher(config).await,
@@ -44,6 +51,7 @@ pub(crate) async fn build_state(config: &Config) -> Result<AppState, StartupErro
             jwt.clone(),
         )),
         jwt,
+        Arc::new(Products::new(product_repo)),
     ))
 }
 

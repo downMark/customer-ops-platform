@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 const allowedModes = new Set(["local", "prod"]);
-const allowedTargets = new Set(["all", "client", "server"]);
+const allowedTargets = new Set(["all", "client", "server", "worker"]);
 
 const getArgValue = (name) => {
   const args = process.argv.slice(2);
@@ -28,10 +28,14 @@ if (!allowedTargets.has(target)) {
   process.exit(1);
 }
 
-const runVite = (args) => {
+const runVite = (args, extraEnv = {}) => {
   const result = spawnSync("vite", args, {
     stdio: "inherit",
     shell: true,
+    env: {
+      ...process.env,
+      ...extraEnv,
+    },
   });
 
   if (result.status !== 0) {
@@ -42,11 +46,19 @@ const runVite = (args) => {
 const buildClient = () => runVite(["build", "--mode", viteMode]);
 const buildServer = () =>
   runVite(["build", "--ssr", "app/server/server.ts", "--mode", viteMode]);
+const buildWorker = () =>
+  runVite(
+    ["build", "--ssr", "app/server/worker.ts", "--mode", viteMode],
+    { BUILD_RUNTIME: "cloudflare-worker" }
+  );
 
 if (target === "client") {
   buildClient();
 } else if (target === "server") {
   buildServer();
+} else if (target === "worker") {
+  buildClient();
+  buildWorker();
 } else {
   buildClient();
   buildServer();
