@@ -1,0 +1,544 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Customer Ops shared AWS foundation resources.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+    MinLength: 1
+  FrontendOrigin:
+    Type: String
+    Default: https://placeholder.invalid
+    MinLength: 1
+  ModelBucketName:
+    Type: String
+    Default: customer-ops-models
+  ModelObjectKey:
+    Type: String
+    Default: models/customer-ops/customer-ops-q4_k_m.gguf
+  GpuInstanceType:
+    Type: String
+    Default: g4dn.xlarge
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.42.0.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.42.1.0/24
+  GpuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended/image_id
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-public
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet1Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-public-a
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet2Cidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-public-b
+
+  PublicSubnet1RouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public model API ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-alb
+
+  ModelApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Model API Fargate tasks
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 4111
+          ToPort: 4111
+          SourceSecurityGroupId: !Ref PublicAlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-model-api
+
+  GpuInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: GPU ECS instances serving the private model endpoint
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ModelApiSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-gpu
+
+  ModelApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub customer-ops/${Environment}/model-api
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Retain 20 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},"action":{"type":"expire"}}]}
+
+  ModelServerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub customer-ops/${Environment}/model-server
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Retain 10 GPU images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  DeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLambdaArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub customer-ops/${Environment}/database-url
+      SecretString: !Ref DatabaseUrl
+
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub customer-ops/${Environment}/jwt-secret
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  ModelApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub customer-ops/${Environment}/model-api-key
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  DomainEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub customer-ops-${Environment}-domain-events
+
+  QualityDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub customer-ops-${Environment}-quality-dlq
+      MessageRetentionPeriod: 1209600
+
+  AnalyticsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub customer-ops-${Environment}-analytics-dlq
+      MessageRetentionPeriod: 1209600
+
+  QualityQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub customer-ops-${Environment}-quality
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt QualityDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  AnalyticsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub customer-ops-${Environment}-analytics
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AnalyticsDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  QualitySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DomainEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt QualityQueue.Arn
+      RawMessageDelivery: true
+
+  AnalyticsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DomainEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyticsQueue.Arn
+      RawMessageDelivery: true
+
+  EventQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref QualityQueue
+        - !Ref AnalyticsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource:
+              - !GetAtt QualityQueue.Arn
+              - !GetAtt AnalyticsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref DomainEventsTopic
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub customer-ops-${Environment}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-ecs-instance
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub customer-ops-${Environment}-ecs-instance
+      Roles:
+        - !Ref EcsInstanceRole
+
+  GpuLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub customer-ops-${Environment}-gpu
+      LaunchTemplateData:
+        ImageId: !Ref GpuAmiId
+        InstanceType: !Ref GpuInstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EcsInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref GpuInstanceSecurityGroup
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 80
+              VolumeType: gp3
+              Encrypted: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo "ECS_CLUSTER=${EcsCluster}" >> /etc/ecs/ecs.config
+            echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
+
+  GpuAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub customer-ops-${Environment}-gpu
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      MinSize: "0"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      NewInstancesProtectedFromScaleIn: true
+      LaunchTemplate:
+        LaunchTemplateId: !Ref GpuLaunchTemplate
+        Version: !GetAtt GpuLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-gpu
+          PropagateAtLaunch: true
+
+  GpuCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Sub customer-ops-${Environment}-gpu
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref GpuAutoScalingGroup
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 1
+        ManagedTerminationProtection: ENABLED
+
+  ClusterCapacityProviderAssociations:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref EcsCluster
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+        - !Ref GpuCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-task-execution
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadRuntimeSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ModelApiKeySecret
+
+  ModelServerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-model-server-task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadModelArtifact
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ModelBucketName}/${ModelObjectKey}
+
+  ModelApiTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-model-api-task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  ModelApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /customer-ops/${Environment}/model-api
+      RetentionInDays: 30
+
+  ModelServerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /customer-ops/${Environment}/model-server
+      RetentionInDays: 30
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/customer-ops-${Environment}-backend
+      RetentionInDays: 30
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub customer-ops-${Environment}-vpc-id
+  PublicSubnetIds:
+    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+    Export:
+      Name: !Sub customer-ops-${Environment}-public-subnets
+  PublicAlbSecurityGroupId:
+    Value: !Ref PublicAlbSecurityGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-alb-sg
+  ModelApiSecurityGroupId:
+    Value: !Ref ModelApiSecurityGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-api-sg
+  ClusterName:
+    Value: !Ref EcsCluster
+    Export:
+      Name: !Sub customer-ops-${Environment}-cluster
+  GpuCapacityProviderName:
+    Value: !Ref GpuCapacityProvider
+    Export:
+      Name: !Sub customer-ops-${Environment}-gpu-capacity-provider
+  ModelApiRepositoryUri:
+    Value: !GetAtt ModelApiRepository.RepositoryUri
+  ModelApiRepositoryName:
+    Value: !Ref ModelApiRepository
+  ModelServerRepositoryUri:
+    Value: !GetAtt ModelServerRepository.RepositoryUri
+  ModelServerRepositoryName:
+    Value: !Ref ModelServerRepository
+  DeploymentBucketName:
+    Value: !Ref DeploymentBucket
+  EcsTaskExecutionRoleArn:
+    Value: !GetAtt EcsTaskExecutionRole.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-task-execution-role
+  ModelServerTaskRoleArn:
+    Value: !GetAtt ModelServerTaskRole.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-server-task-role
+  ModelApiTaskRoleArn:
+    Value: !GetAtt ModelApiTaskRole.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-api-task-role
+  DatabaseSecretArn:
+    Value: !Ref DatabaseSecret
+    Export:
+      Name: !Sub customer-ops-${Environment}-database-secret
+  JwtSecretArn:
+    Value: !Ref JwtSecret
+    Export:
+      Name: !Sub customer-ops-${Environment}-jwt-secret
+  ModelApiKeySecretArn:
+    Value: !Ref ModelApiKeySecret
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-api-key-secret
+  DomainEventsTopicArn:
+    Value: !Ref DomainEventsTopic
+    Export:
+      Name: !Sub customer-ops-${Environment}-domain-events-topic
+  ModelApiLogGroupName:
+    Value: !Ref ModelApiLogGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-api-log-group
+  ModelServerLogGroupName:
+    Value: !Ref ModelServerLogGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-model-server-log-group
+  FrontendOrigin:
+    Value: !Ref FrontendOrigin
+    Export:
+      Name: !Sub customer-ops-${Environment}-frontend-origin

@@ -14,19 +14,22 @@
     "head_sampling_rate": 1
   },
   "vars": {
-    "SSR_API_BASE_URL": "http://localhost:8080"
+    "SSR_API_BASE_URL": "http://localhost:8080",
+    "MODEL_API_BASE_URL": "http://localhost:4111"
   },
   "env": {
     "staging": {
       "name": "customer-ops-frontend-staging",
       "vars": {
-        "SSR_API_BASE_URL": "https://staging-api.example.com"
+        "SSR_API_BASE_URL": "https://staging-api.example.com",
+        "MODEL_API_BASE_URL": "http://staging-model-api.example.com"
       }
     },
     "production": {
       "name": "customer-ops-frontend-production",
       "vars": {
-        "SSR_API_BASE_URL": "https://api.example.com"
+        "SSR_API_BASE_URL": "https://api.example.com",
+        "MODEL_API_BASE_URL": "http://model-api.example.com"
       }
     }
   }

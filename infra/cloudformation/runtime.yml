@@ -1,0 +1,505 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Customer Ops Lambda, API Gateway, ECS services, and load balancers.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  BackendLambdaCodeBucket:
+    Type: String
+  BackendLambdaCodeKey:
+    Type: String
+  ModelApiImageUri:
+    Type: String
+  ModelServerImageUri:
+    Type: String
+  ModelBucketName:
+    Type: String
+    Default: customer-ops-models
+  ModelObjectKey:
+    Type: String
+    Default: models/customer-ops/customer-ops-q4_k_m.gguf
+  ModelSha256:
+    Type: String
+    Default: ""
+  BackendCanaryPercent:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 1
+
+Resources:
+  BackendLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-backend-lambda
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PublishDomainEvents
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource:
+                  Fn::ImportValue: !Sub customer-ops-${Environment}-domain-events-topic
+
+  BackendFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub customer-ops-${Environment}-backend
+      Description: Customer Ops authenticated order API
+      Runtime: provided.al2023
+      Handler: bootstrap
+      Architectures: [x86_64]
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt BackendLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref BackendLambdaCodeBucket
+        S3Key: !Ref BackendLambdaCodeKey
+      Environment:
+        Variables:
+          DATABASE_URL:
+            Fn::Sub:
+              - "{{resolve:secretsmanager:${SecretArn}:SecretString}}"
+              - SecretArn:
+                  Fn::ImportValue: !Sub customer-ops-${Environment}-database-secret
+          AUTH_JWT_SECRET:
+            Fn::Sub:
+              - "{{resolve:secretsmanager:${SecretArn}:SecretString}}"
+              - SecretArn:
+                  Fn::ImportValue: !Sub customer-ops-${Environment}-jwt-secret
+          AUTH_JWT_TTL_SECONDS: "86400"
+          DB_MAX_CONNECTIONS: "2"
+          CORS_ORIGINS:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-frontend-origin
+          SNS_TOPIC_ARN:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-domain-events-topic
+          RUST_LOG: info,customer_ops_backend=info
+
+  BackendInitialVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref BackendFunction
+      Description: !Sub Initial ${Environment} version from ${BackendLambdaCodeKey}
+
+  BackendStableAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      Name: stable
+      Description: Stable backend version receiving normal API traffic
+      FunctionName: !Ref BackendFunction
+      FunctionVersion: !GetAtt BackendInitialVersion.Version
+
+  BackendCanaryAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      Name: canary
+      Description: Candidate backend version receiving API Gateway canary traffic
+      FunctionName: !Ref BackendFunction
+      FunctionVersion: !GetAtt BackendInitialVersion.Version
+
+  BackendRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub customer-ops-${Environment}-backend
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  BackendRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BackendRestApi
+      ResourceId: !GetAtt BackendRestApi.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}:${!stageVariables.lambdaAlias}/invocations
+
+  BackendProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BackendRestApi
+      ParentId: !GetAtt BackendRestApi.RootResourceId
+      PathPart: "{proxy+}"
+
+  BackendProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BackendRestApi
+      ResourceId: !Ref BackendProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}:${!stageVariables.lambdaAlias}/invocations
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+
+  BackendApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - BackendRootMethod
+      - BackendProxyMethod
+    Properties:
+      RestApiId: !Ref BackendRestApi
+
+  BackendApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref BackendRestApi
+      DeploymentId: !Ref BackendApiDeployment
+      StageName: !Ref Environment
+      TracingEnabled: true
+      Variables:
+        lambdaAlias: stable
+      CanarySetting:
+        PercentTraffic: !Ref BackendCanaryPercent
+        UseStageCache: false
+        StageVariableOverrides:
+          lambdaAlias: canary
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: true
+
+  BackendStableInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackendStableAlias
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BackendRestApi}/*
+
+  BackendCanaryInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackendCanaryAlias
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BackendRestApi}/*
+
+  BackendCanaryErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-backend-canary-errors
+      AlarmDescription: Roll back the backend canary when the candidate Lambda errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackendFunction
+        - Name: Resource
+          Value: !Sub ${BackendFunction}:canary
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  BackendApi5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-backend-api-5xx
+      AlarmDescription: Roll back the backend canary when API Gateway returns 5XX responses.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub customer-ops-${Environment}-backend
+        - Name: Stage
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  ModelServerLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub cops-${Environment}-model-int
+      Scheme: internal
+      Type: network
+      Subnets:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
+
+  ModelServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub cops-${Environment}-model
+      VpcId:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-vpc-id
+      Port: 8000
+      Protocol: TCP
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckPort: "8000"
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      HealthCheckIntervalSeconds: 30
+
+  ModelServerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ModelServerLoadBalancer
+      Port: 8000
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ModelServerTargetGroup
+
+  ModelServerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub customer-ops-${Environment}-model-server
+      RequiresCompatibilities: [EC2]
+      NetworkMode: host
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-task-execution-role
+      TaskRoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-task-role
+      Volumes:
+        - Name: model-cache
+          Host:
+            SourcePath: /opt/customer-ops/models
+      ContainerDefinitions:
+        - Name: model-server
+          Image: !Ref ModelServerImageUri
+          Essential: true
+          Cpu: 2048
+          Memory: 14000
+          PortMappings:
+            - ContainerPort: 8000
+              HostPort: 8000
+              Protocol: tcp
+          ResourceRequirements:
+            - Type: GPU
+              Value: "1"
+          MountPoints:
+            - SourceVolume: model-cache
+              ContainerPath: /models
+              ReadOnly: false
+          Environment:
+            - Name: MODEL_S3_URI
+              Value: !Sub s3://${ModelBucketName}/${ModelObjectKey}
+            - Name: MODEL_SHA256
+              Value: !Ref ModelSha256
+            - Name: MODEL_PATH
+              Value: /models/customer-ops-q4_k_m.gguf
+            - Name: MODEL_ALIAS
+              Value: customer-ops
+            - Name: MODEL_HOST
+              Value: 0.0.0.0
+            - Name: MODEL_PORT
+              Value: "8000"
+            - Name: MODEL_GPU_LAYERS
+              Value: "-1"
+          Secrets:
+            - Name: MODEL_SERVER_API_KEY
+              ValueFrom:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-model-api-key-secret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-log-group
+              awslogs-stream-prefix: ecs
+
+  ModelServerService:
+    Type: AWS::ECS::Service
+    DependsOn: ModelServerListener
+    Properties:
+      ServiceName: !Sub customer-ops-${Environment}-model-server
+      Cluster:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
+      TaskDefinition: !Ref ModelServerTaskDefinition
+      DesiredCount: 1
+      CapacityProviderStrategy:
+        - CapacityProvider:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-gpu-capacity-provider
+          Weight: 1
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      LoadBalancers:
+        - ContainerName: model-server
+          ContainerPort: 8000
+          TargetGroupArn: !Ref ModelServerTargetGroup
+
+  ModelApiLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub cops-${Environment}-api
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-alb-sg
+      Subnets:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
+
+  ModelApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub cops-${Environment}-api
+      VpcId:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-vpc-id
+      Port: 4111
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /api/health
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200-399
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      HealthCheckIntervalSeconds: 30
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  ModelApiListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ModelApiLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ModelApiTargetGroup
+
+  ModelApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub customer-ops-${Environment}-model-api
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-task-execution-role
+      TaskRoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-model-api-task-role
+      ContainerDefinitions:
+        - Name: model-api
+          Image: !Ref ModelApiImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 4111
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: "4111"
+            - Name: MODEL_SERVER_BASE_URL
+              Value: !Sub http://${ModelServerLoadBalancer.DNSName}:8000/v1
+            - Name: MODEL_SERVER_MODEL
+              Value: customer-ops
+            - Name: BACKEND_BASE_URL
+              Value: !Sub https://${BackendRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${Environment}
+            - Name: CORS_ORIGINS
+              Value:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-frontend-origin
+          Secrets:
+            - Name: MODEL_SERVER_API_KEY
+              ValueFrom:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-model-api-key-secret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-model-api-log-group
+              awslogs-stream-prefix: ecs
+
+  ModelApiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ModelApiListener
+      - ModelServerService
+    Properties:
+      ServiceName: !Sub customer-ops-${Environment}-model-api
+      Cluster:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
+      TaskDefinition: !Ref ModelApiTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      HealthCheckGracePeriodSeconds: 900
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            Fn::Split:
+              - ","
+              - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
+          SecurityGroups:
+            - Fn::ImportValue: !Sub customer-ops-${Environment}-model-api-sg
+      LoadBalancers:
+        - ContainerName: model-api
+          ContainerPort: 4111
+          TargetGroupArn: !Ref ModelApiTargetGroup
+
+Outputs:
+  BackendLambdaFunctionName:
+    Value: !Ref BackendFunction
+  BackendStableAliasName:
+    Value: !Ref BackendStableAlias
+  BackendCanaryAliasName:
+    Value: !Ref BackendCanaryAlias
+  BackendRestApiId:
+    Value: !Ref BackendRestApi
+  BackendApiStageName:
+    Value: !Ref BackendApiStage
+  BackendCanaryErrorAlarmName:
+    Value: !Ref BackendCanaryErrorAlarm
+  BackendApi5xxAlarmName:
+    Value: !Ref BackendApi5xxAlarm
+  BackendApiUrl:
+    Value: !Sub https://${BackendRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${Environment}
+  ModelApiLoadBalancerUrl:
+    Value: !Sub http://${ModelApiLoadBalancer.DNSName}
+  ModelApiLoadBalancerDnsName:
+    Value: !GetAtt ModelApiLoadBalancer.DNSName
+  ModelServerLoadBalancerDnsName:
+    Value: !GetAtt ModelServerLoadBalancer.DNSName
+  EcsClusterName:
+    Value:
+      Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
+  ModelApiServiceName:
+    Value: !GetAtt ModelApiService.Name
+  ModelServerServiceName:
+    Value: !GetAtt ModelServerService.Name
+  ModelApiTaskDefinitionFamily:
+    Value: !Sub customer-ops-${Environment}-model-api
+  ModelServerTaskDefinitionFamily:
+    Value: !Sub customer-ops-${Environment}-model-server

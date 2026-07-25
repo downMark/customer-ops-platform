@@ -1,0 +1,275 @@
+name: Infrastructure - Provision Platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub Environment and deployment target
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      confirmation:
+        description: Type PROVISION to create/update billable AWS resources
+        required: true
+        type: string
+      gpu_instance_type:
+        description: GPU EC2 instance type
+        required: true
+        default: g4dn.xlarge
+        type: string
+
+concurrency:
+  group: infrastructure-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+  AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
+  FOUNDATION_STACK: customer-ops-${{ inputs.environment }}-foundation
+  RUNTIME_STACK: customer-ops-${{ inputs.environment }}-runtime
+  MODEL_BUCKET_NAME: ${{ vars.MODEL_BUCKET_NAME || 'customer-ops-models' }}
+  MODEL_OBJECT_KEY: ${{ vars.MODEL_OBJECT_KEY || 'models/customer-ops/customer-ops-q4_k_m.gguf' }}
+
+jobs:
+  provision:
+    name: Provision ${{ inputs.environment }}
+    if: inputs.confirmation == 'PROVISION'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate required configuration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          : "${DATABASE_URL:?Configure DATABASE_URL as a GitHub Environment secret}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?Configure CLOUDFLARE_ACCOUNT_ID in the GitHub Environment}"
+          : "${CLOUDFLARE_API_TOKEN:?Configure CLOUDFLARE_API_TOKEN in the GitHub Environment}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify model artifact
+        run: |
+          aws s3api head-object \
+            --bucket "${MODEL_BUCKET_NAME}" \
+            --key "${MODEL_OBJECT_KEY}"
+
+      - name: Deploy foundation stack
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN || 'https://placeholder.invalid' }}
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${FOUNDATION_STACK}" \
+            --template-file infra/cloudformation/foundation.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment="${{ inputs.environment }}" \
+              DatabaseUrl="${DATABASE_URL}" \
+              FrontendOrigin="${FRONTEND_ORIGIN}" \
+              ModelBucketName="${MODEL_BUCKET_NAME}" \
+              ModelObjectKey="${MODEL_OBJECT_KEY}" \
+              GpuInstanceType="${{ inputs.gpu_instance_type }}"
+
+      - name: Read foundation outputs
+        id: foundation
+        run: |
+          artifact_bucket="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${FOUNDATION_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='DeploymentBucketName'].OutputValue" \
+              --output text
+          )"
+          model_api_repository_uri="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${FOUNDATION_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='ModelApiRepositoryUri'].OutputValue" \
+              --output text
+          )"
+          model_server_repository_uri="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${FOUNDATION_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='ModelServerRepositoryUri'].OutputValue" \
+              --output text
+          )"
+          {
+            echo "ARTIFACT_BUCKET=${artifact_bucket}"
+            echo "MODEL_API_REPOSITORY_URI=${model_api_repository_uri}"
+            echo "MODEL_SERVER_REPOSITORY_URI=${model_server_repository_uri}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "artifact_bucket=${artifact_bucket}"
+            echo "model_api_repository_uri=${model_api_repository_uri}"
+            echo "model_server_repository_uri=${model_server_repository_uri}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Rust and Cargo Lambda
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: 1.94.1
+          bins: cargo-lambda
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Build and upload backend Lambda
+        working-directory: apps/backend
+        run: |
+          cargo lambda build \
+            --release \
+            --output-format zip \
+            --bin lambda \
+            --features lambda,sns
+          lambda_key="lambda/${{ inputs.environment }}/${GITHUB_SHA}/bootstrap.zip"
+          aws s3 cp \
+            target/lambda/lambda/bootstrap.zip \
+            "s3://${ARTIFACT_BUCKET}/${lambda_key}" \
+            --only-show-errors
+          echo "LAMBDA_CODE_KEY=${lambda_key}" >> "${GITHUB_ENV}"
+
+      - name: Sign in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push model-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/model-api
+          file: apps/model-api/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.foundation.outputs.model_api_repository_uri }}:${{ github.sha }}
+          cache-from: type=gha,scope=model-api
+          cache-to: type=gha,mode=max,scope=model-api
+
+      - name: Build and push GPU model-server image
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/model-server
+          file: apps/model-server/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.foundation.outputs.model_server_repository_uri }}:${{ github.sha }}
+          cache-from: type=gha,scope=model-server
+          cache-to: type=gha,mode=max,scope=model-server
+
+      - name: Read optional model checksum
+        run: |
+          checksum="$(
+            aws s3 cp \
+              "s3://${MODEL_BUCKET_NAME}/${MODEL_OBJECT_KEY}.sha256" - \
+              --only-show-errors 2>/dev/null | awk '{print $1}' || true
+          )"
+          echo "MODEL_SHA256=${checksum}" >> "${GITHUB_ENV}"
+
+      - name: Deploy runtime stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${RUNTIME_STACK}" \
+            --template-file infra/cloudformation/runtime.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              Environment="${{ inputs.environment }}" \
+              BackendLambdaCodeBucket="${ARTIFACT_BUCKET}" \
+              BackendLambdaCodeKey="${LAMBDA_CODE_KEY}" \
+              ModelApiImageUri="${MODEL_API_REPOSITORY_URI}:${GITHUB_SHA}" \
+              ModelServerImageUri="${MODEL_SERVER_REPOSITORY_URI}:${GITHUB_SHA}" \
+              ModelBucketName="${MODEL_BUCKET_NAME}" \
+              ModelObjectKey="${MODEL_OBJECT_KEY}" \
+              ModelSha256="${MODEL_SHA256}"
+
+      - name: Read runtime endpoints
+        id: runtime
+        run: |
+          backend_url="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='BackendApiUrl'].OutputValue" \
+              --output text
+          )"
+          model_api_url="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='ModelApiLoadBalancerUrl'].OutputValue" \
+              --output text
+          )"
+          {
+            echo "BACKEND_API_URL=${backend_url}"
+            echo "MODEL_API_URL=${model_api_url}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "backend_api_url=${backend_url}"
+            echo "model_api_url=${model_api_url}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: apps/frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend Worker
+        working-directory: apps/frontend
+        env:
+          VITE_API_BASE_URL: /backend-api
+          VITE_CHAT_API_BASE_URL: /model-api
+        run: pnpm build:worker
+
+      - name: Create or update Cloudflare Worker
+        id: cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/frontend
+          command: >-
+            deploy --env ${{ inputs.environment }}
+            --var SSR_API_BASE_URL:${{ steps.runtime.outputs.backend_api_url }}
+            --var MODEL_API_BASE_URL:${{ steps.runtime.outputs.model_api_url }}
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "### Customer Ops platform"
+            echo
+            echo "- Environment: \`${{ inputs.environment }}\`"
+            echo "- Foundation stack: \`${FOUNDATION_STACK}\`"
+            echo "- Runtime stack: \`${RUNTIME_STACK}\`"
+            echo "- Backend API: \`${BACKEND_API_URL}\`"
+            echo "- Model API origin: \`${MODEL_API_URL}\`"
+            echo "- Frontend URL: \`${{ steps.cloudflare.outputs.deployment-url }}\`"
+            echo "- GPU instance: \`${{ inputs.gpu_instance_type }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

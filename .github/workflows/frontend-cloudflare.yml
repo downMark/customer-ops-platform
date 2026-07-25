@@ -73,10 +73,15 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+    permissions:
+      contents: read
+      id-token: write
     env:
       DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
-      VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
-      VITE_CHAT_API_BASE_URL: ${{ vars.VITE_CHAT_API_BASE_URL }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
+      RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
+      VITE_CHAT_API_BASE_URL: /model-api
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -101,21 +106,54 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          SSR_API_BASE_URL: ${{ vars.SSR_API_BASE_URL }}
         run: |
           : "${CLOUDFLARE_ACCOUNT_ID:?Configure CLOUDFLARE_ACCOUNT_ID in the GitHub Environment}"
           : "${CLOUDFLARE_API_TOKEN:?Configure CLOUDFLARE_API_TOKEN in the GitHub Environment}"
-          : "${SSR_API_BASE_URL:?Configure SSR_API_BASE_URL in the GitHub Environment}"
-          : "${VITE_API_BASE_URL:?Configure VITE_API_BASE_URL in the GitHub Environment}"
-          : "${VITE_CHAT_API_BASE_URL:?Configure VITE_CHAT_API_BASE_URL in the GitHub Environment}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Discover platform endpoints
+        id: resources
+        run: |
+          read_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          {
+            echo "backend_url=$(read_output BackendApiUrl)"
+            echo "model_api_url=$(read_output ModelApiLoadBalancerUrl)"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Build Worker
+        env:
+          VITE_API_BASE_URL: /backend-api
+          VITE_CHAT_API_BASE_URL: /model-api
         run: pnpm build:worker
 
       - name: Deploy Worker
+        id: cloudflare
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/frontend
-          command: deploy --env ${{ env.DEPLOY_ENV }} --var SSR_API_BASE_URL:${{ vars.SSR_API_BASE_URL }}
+          command: >-
+            deploy --env ${{ env.DEPLOY_ENV }}
+            --var SSR_API_BASE_URL:${{ steps.resources.outputs.backend_url }}
+            --var MODEL_API_BASE_URL:${{ steps.resources.outputs.model_api_url }}
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "### Frontend Worker"
+            echo
+            echo "- Environment: \`${DEPLOY_ENV}\`"
+            echo "- Frontend URL: \`${{ steps.cloudflare.outputs.deployment-url }}\`"
+            echo "- Backend and model APIs are accessed through same-origin Worker proxies"
+          } >> "${GITHUB_STEP_SUMMARY}"

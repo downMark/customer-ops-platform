@@ -78,13 +78,10 @@ jobs:
       contents: read
       id-token: write
     env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      ECR_REPOSITORY: ${{ vars.MODEL_API_ECR_REPOSITORY }}
-      ECS_CLUSTER: ${{ vars.MODEL_API_ECS_CLUSTER }}
-      ECS_SERVICE: ${{ vars.MODEL_API_ECS_SERVICE }}
-      ECS_CONTAINER_NAME: ${{ vars.MODEL_API_ECS_CONTAINER_NAME }}
-      ECS_TASK_DEFINITION_FAMILY: ${{ vars.MODEL_API_TASK_DEFINITION_FAMILY }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
+      FOUNDATION_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-foundation
+      RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -93,17 +90,34 @@ jobs:
         run: |
           : "${AWS_REGION:?Configure AWS_REGION in the GitHub Environment}"
           : "${AWS_DEPLOY_ROLE_ARN:?Configure AWS_DEPLOY_ROLE_ARN in the GitHub Environment}"
-          : "${ECR_REPOSITORY:?Configure MODEL_API_ECR_REPOSITORY in the GitHub Environment}"
-          : "${ECS_CLUSTER:?Configure MODEL_API_ECS_CLUSTER in the GitHub Environment}"
-          : "${ECS_SERVICE:?Configure MODEL_API_ECS_SERVICE in the GitHub Environment}"
-          : "${ECS_CONTAINER_NAME:?Configure MODEL_API_ECS_CONTAINER_NAME in the GitHub Environment}"
-          : "${ECS_TASK_DEFINITION_FAMILY:?Configure MODEL_API_TASK_DEFINITION_FAMILY in the GitHub Environment}"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Discover deployment resources
+        id: resources
+        run: |
+          foundation_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "${FOUNDATION_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          runtime_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          {
+            echo "ecr_repository=$(foundation_output ModelApiRepositoryName)"
+            echo "ecs_cluster=$(runtime_output EcsClusterName)"
+            echo "ecs_service=$(runtime_output ModelApiServiceName)"
+            echo "task_family=$(runtime_output ModelApiTaskDefinitionFamily)"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Sign in to Amazon ECR
         id: ecr
@@ -119,14 +133,14 @@ jobs:
           file: apps/model-api/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          tags: ${{ steps.ecr.outputs.registry }}/${{ steps.resources.outputs.ecr_repository }}:${{ github.sha }}
           cache-from: type=gha,scope=model-api
           cache-to: type=gha,mode=max,scope=model-api
 
       - name: Download active task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition "${ECS_TASK_DEFINITION_FAMILY}" \
+            --task-definition "${{ steps.resources.outputs.task_family }}" \
             --query taskDefinition \
             > "${RUNNER_TEMP}/model-api-task-definition.json"
 
@@ -135,15 +149,15 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ${{ runner.temp }}/model-api-task-definition.json
-          container-name: ${{ env.ECS_CONTAINER_NAME }}
-          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          container-name: model-api
+          image: ${{ steps.ecr.outputs.registry }}/${{ steps.resources.outputs.ecr_repository }}:${{ github.sha }}
 
       - name: Deploy task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task.outputs.task-definition }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ steps.resources.outputs.ecs_cluster }}
+          service: ${{ steps.resources.outputs.ecs_service }}
           wait-for-service-stability: true
 
       - name: Deployment summary
@@ -151,7 +165,7 @@ jobs:
           {
             echo "### Mastra model-api"
             echo
-            echo "- Cluster/service: \`${ECS_CLUSTER}/${ECS_SERVICE}\`"
-            echo "- Image: \`${ECR_REPOSITORY}:${GITHUB_SHA}\`"
+            echo "- Cluster/service: \`${{ steps.resources.outputs.ecs_cluster }}/${{ steps.resources.outputs.ecs_service }}\`"
+            echo "- Image: \`${{ steps.resources.outputs.ecr_repository }}:${GITHUB_SHA}\`"
             echo "- Exposure: public HTTPS ALB; CORS restricted by \`CORS_ORIGINS\`"
           } >> "${GITHUB_STEP_SUMMARY}"

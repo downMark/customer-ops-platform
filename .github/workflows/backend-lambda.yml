@@ -67,9 +67,10 @@ jobs:
       contents: read
       id-token: write
     env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      BACKEND_LAMBDA_FUNCTION_NAME: ${{ vars.BACKEND_LAMBDA_FUNCTION_NAME }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
+      RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
+      CANARY_PERCENT: ${{ vars.BACKEND_CANARY_PERCENT || '0.10' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -89,7 +90,6 @@ jobs:
         run: |
           : "${AWS_REGION:?Configure AWS_REGION in the GitHub Environment}"
           : "${AWS_DEPLOY_ROLE_ARN:?Configure AWS_DEPLOY_ROLE_ARN in the GitHub Environment}"
-          : "${BACKEND_LAMBDA_FUNCTION_NAME:?Configure BACKEND_LAMBDA_FUNCTION_NAME in the GitHub Environment}"
 
       - name: Build Lambda package
         run: cargo lambda build --release --output-format zip --bin lambda --features lambda,sns
@@ -100,7 +100,21 @@ jobs:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Publish Lambda code
+      - name: Discover backend deployment resources
+        run: |
+          read_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          {
+            echo "BACKEND_LAMBDA_FUNCTION_NAME=$(read_output BackendLambdaFunctionName)"
+            echo "BACKEND_REST_API_ID=$(read_output BackendRestApiId)"
+            echo "BACKEND_API_STAGE=$(read_output BackendApiStageName)"
+          } >> "${GITHUB_ENV}"
+
+      - name: Publish Lambda candidate version
         id: publish
         run: |
           version="$(
@@ -115,6 +129,33 @@ jobs:
             --function-name "${BACKEND_LAMBDA_FUNCTION_NAME}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
+      - name: Start canary for manual rollout
+        env:
+          CANDIDATE_VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          reset_canary() {
+            aws apigateway update-stage \
+              --rest-api-id "${BACKEND_REST_API_ID}" \
+              --stage-name "${BACKEND_API_STAGE}" \
+              --patch-operations \
+                op=replace,path=/canarySettings/percentTraffic,value=0 \
+              >/dev/null
+          }
+
+          reset_canary
+          aws lambda update-alias \
+            --function-name "${BACKEND_LAMBDA_FUNCTION_NAME}" \
+            --name canary \
+            --function-version "${CANDIDATE_VERSION}" \
+            >/dev/null
+          aws apigateway update-stage \
+            --rest-api-id "${BACKEND_REST_API_ID}" \
+            --stage-name "${BACKEND_API_STAGE}" \
+            --patch-operations \
+              op=replace,path=/canarySettings/percentTraffic,value="${CANARY_PERCENT}" \
+              op=replace,path=/canarySettings/stageVariableOverrides/lambdaAlias,value=canary \
+            >/dev/null
+
       - name: Deployment summary
         run: |
           {
@@ -123,5 +164,8 @@ jobs:
             echo "- Environment: \`${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}\`"
             echo "- Function: \`${BACKEND_LAMBDA_FUNCTION_NAME}\`"
             echo "- Published version: \`${{ steps.publish.outputs.version }}\`"
+            echo "- Canary: started at \`${CANARY_PERCENT}\`; no automatic traffic changes will follow"
+            echo "- Manual rollout: API Gateway > REST APIs > \`customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-backend\` > Stages > \`${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}\` > Canary"
+            echo "- Roll back by setting canary traffic to \`0%\`; increase it manually when ready"
             echo "- Region: \`${AWS_REGION}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

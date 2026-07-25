@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: One-time permissions bootstrap for the existing GitHub OIDC deploy role.
+
+Parameters:
+  DeployRoleName:
+    Type: String
+    Default: gh-actions-deploy
+
+Resources:
+  GitHubDeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: customer-ops-cloudformation-deploy
+      Roles:
+        - !Ref DeployRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ManageCustomerOpsStacks
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResources
+              - cloudformation:DescribeStacks
+              - cloudformation:GetTemplate
+              - cloudformation:ListStackResources
+              - cloudformation:UpdateStack
+              - cloudformation:ValidateTemplate
+            Resource: "*"
+          - Sid: ManageCustomerOpsResources
+            Effect: Allow
+            Action:
+              - apigateway:*
+              - autoscaling:*
+              - cloudwatch:*
+              - ec2:*
+              - ecr:*
+              - ecs:*
+              - elasticloadbalancing:*
+              - lambda:*
+              - logs:*
+              - s3:*
+              - secretsmanager:*
+              - sns:*
+              - sqs:*
+            Resource: "*"
+          - Sid: ManageCustomerOpsRoles
+            Effect: Allow
+            Action:
+              - iam:CreateInstanceProfile
+              - iam:CreatePolicy
+              - iam:CreateRole
+              - iam:DeleteInstanceProfile
+              - iam:DeletePolicy
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+              - iam:GetInstanceProfile
+              - iam:GetPolicy
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:ListRolePolicies
+              - iam:PassRole
+              - iam:PutRolePolicy
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:AttachRolePolicy
+              - iam:CreateServiceLinkedRole
+              - iam:DeleteServiceLinkedRole
+              - iam:DetachRolePolicy
+              - iam:GetServiceLinkedRoleDeletionStatus
+              - iam:TagInstanceProfile
+              - iam:TagPolicy
+              - iam:TagRole
+              - iam:UntagInstanceProfile
+              - iam:UntagPolicy
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/customer-ops-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/customer-ops-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/customer-ops-*
+
+Outputs:
+  DeployRoleName:
+    Value: !Ref DeployRoleName
