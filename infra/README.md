@@ -20,25 +20,6 @@ The GPU instance is created only when the Infrastructure workflow is explicitly
 dispatched with `PROVISION`. It has ongoing EC2 and EBS cost until the foundation
 stack is deleted or its Auto Scaling desired capacity is changed to zero.
 
-## One-time GitHub role bootstrap
-
-The existing `gh-actions-deploy` role must be able to operate CloudFormation and
-the resource types in the templates. Its current image/Lambda update policy is
-not enough to create the first stack.
-
-An AWS administrator applies the policy through CloudFormation once:
-
-```bash
-aws cloudformation deploy \
-  --region ap-northeast-1 \
-  --stack-name customer-ops-github-deploy-bootstrap \
-  --template-file infra/cloudformation/bootstrap-deploy-role.yml \
-  --capabilities CAPABILITY_IAM
-```
-
-This command does not create application infrastructure. After it succeeds,
-GitHub Actions owns all platform resource creation and updates.
-
 ## GitHub Environments
 
 Create `staging` and/or `production` GitHub Environments with:
@@ -46,7 +27,9 @@ Create `staging` and/or `production` GitHub Environments with:
 Secrets:
 
 - `DATABASE_URL`: Neon pooled PostgreSQL connection URL.
-- `CLOUDFLARE_API_TOKEN`: token allowed to deploy Workers.
+- `CLOUDFLARE_API_TOKEN`: account-scoped token with **Workers Scripts: Edit**
+  and **Account Settings: Read** for the account in
+  `CLOUDFLARE_ACCOUNT_ID`.
 
 Variables:
 

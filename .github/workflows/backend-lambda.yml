@@ -103,15 +103,30 @@ jobs:
       - name: Discover backend deployment resources
         run: |
           read_output() {
-            aws cloudformation describe-stacks \
-              --stack-name "${RUNTIME_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
-              --output text
+            local output_key="$1"
+            local value
+            if ! value="$(
+              aws cloudformation describe-stacks \
+                --stack-name "${RUNTIME_STACK}" \
+                --query "Stacks[0].Outputs[?OutputKey=='${output_key}'].OutputValue" \
+                --output text 2>/dev/null
+            )"; then
+              echo "::error::Platform stack ${RUNTIME_STACK} is missing. Run 'Infrastructure - Provision Platform' first." >&2
+              return 1
+            fi
+            if [ -z "${value}" ] || [ "${value}" = "None" ]; then
+              echo "::error::CloudFormation output ${output_key} is missing from ${RUNTIME_STACK}." >&2
+              return 1
+            fi
+            printf '%s' "${value}"
           }
+          backend_function="$(read_output BackendLambdaFunctionName)"
+          rest_api_id="$(read_output BackendRestApiId)"
+          api_stage="$(read_output BackendApiStageName)"
           {
-            echo "BACKEND_LAMBDA_FUNCTION_NAME=$(read_output BackendLambdaFunctionName)"
-            echo "BACKEND_REST_API_ID=$(read_output BackendRestApiId)"
-            echo "BACKEND_API_STAGE=$(read_output BackendApiStageName)"
+            echo "BACKEND_LAMBDA_FUNCTION_NAME=${backend_function}"
+            echo "BACKEND_REST_API_ID=${rest_api_id}"
+            echo "BACKEND_API_STAGE=${api_stage}"
           } >> "${GITHUB_ENV}"
 
       - name: Publish Lambda candidate version
