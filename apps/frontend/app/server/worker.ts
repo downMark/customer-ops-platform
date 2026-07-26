@@ -3,6 +3,7 @@ import { httpServerHandler } from "cloudflare:node";
 
 import { createServerApp } from "./index";
 import type { ViteManifest } from "./assets";
+import { createUpstreamUrl } from "./proxy";
 
 // Client assets are built first. Vite resolves this glob while bundling the
 // Worker, so no filesystem access is required at runtime.
@@ -57,9 +58,10 @@ const worker: ExportedHandler<Env> = {
       }
       const upstreamPath =
         requestUrl.pathname.slice(proxy.prefix.length) || "/";
-      const upstreamUrl = new URL(
-        `${upstreamPath}${requestUrl.search}`,
-        `${upstreamBaseUrl}/`,
+      const upstreamUrl = createUpstreamUrl(
+        upstreamBaseUrl,
+        upstreamPath,
+        requestUrl.search,
       );
       const headers = new Headers(request.headers);
       headers.delete("host");
