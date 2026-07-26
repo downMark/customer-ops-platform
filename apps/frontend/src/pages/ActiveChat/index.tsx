@@ -122,21 +122,12 @@ const ActiveChat = () => {
     setMessages((prev) => [...prev, customer, agent]);
     setInput("");
 
-    if (!requestOrderId) {
-      patchMessage(agentId, {
-        streaming: false,
-        error: true,
-        text: "请在消息中提供订单号，例如 ORD-2026-0001。",
-      });
-      return;
-    }
-
     setStreaming(true);
 
     abortRef.current = ChatService.streamMessage(
       {
         conversationId: conversationIdRef.current,
-        orderId: requestOrderId,
+        orderId: requestOrderId || undefined,
         message: text,
       },
       {
@@ -235,7 +226,7 @@ const ActiveChat = () => {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="输入消息，请包含需要查询的订单号…"
+              placeholder="输入消息；查询订单时请包含订单号…"
               className="min-w-0 flex-1 rounded-xl border border-outline-variant px-3 py-3 outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/10 sm:px-4 sm:py-4"
             />
             <button

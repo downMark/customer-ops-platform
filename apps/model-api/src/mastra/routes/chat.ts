@@ -5,7 +5,7 @@ import { chatRequestSchema } from "../../contracts/chat";
 import { AppError, toAppError } from "../../lib/errors";
 import { withTimeout } from "../../lib/signals";
 import { backendClient } from "../../services/backend-client";
-import { buildOrderPrompt } from "../../services/prompt";
+import { buildCustomerPrompt } from "../../services/prompt";
 import { encodeSse, errorSseData, sseResponse } from "../../http/sse";
 
 function getBearerToken(authorization: string | undefined): string {
@@ -50,7 +50,7 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
     if (!parsed.success) {
       const error = new AppError(
         "INVALID_REQUEST",
-        "conversationId、orderId 和 message 均不能为空",
+        "conversationId 和 message 均不能为空；orderId 如提供则必须有效",
         400,
       );
       return sseResponse(
@@ -96,15 +96,17 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
         controller.enqueue(encodeSse({ event: "start", data: { traceId } }));
 
         try {
-          const order = await backendClient.getOrder({
-            orderId: request.orderId,
-            authorization,
-            traceId,
-            signal: c.req.raw.signal,
-          });
+          const order = request.orderId
+            ? await backendClient.getOrder({
+                orderId: request.orderId,
+                authorization,
+                traceId,
+                signal: c.req.raw.signal,
+              })
+            : undefined;
 
           const agent = c.get("mastra").getAgent("customerOpsAgent");
-          const result = await agent.stream(buildOrderPrompt(request, order), {
+          const result = await agent.stream(buildCustomerPrompt(request, order), {
             abortSignal: withTimeout(
               config.modelTimeoutMs,
               c.req.raw.signal,

@@ -11,7 +11,7 @@ export interface ChatMessage {
 
 export interface ChatStreamPayload {
   conversationId: string;
-  orderId: string;
+  orderId?: string;
   message: string;
 }
 
