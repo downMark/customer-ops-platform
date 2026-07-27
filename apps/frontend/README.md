@@ -81,7 +81,7 @@ pnpm check:worker
 pnpm deploy:worker:staging
 ```
 
-自动发布见
+手动发布工作流见
 [../../.github/workflows/frontend-cloudflare.yml](../../.github/workflows/frontend-cloudflare.yml)。
 不要把 token、账号密码或 API secret 写入 `vars`；机密值使用 GitHub
 Environment secrets、`wrangler secret put` 或 Cloudflare Dashboard。

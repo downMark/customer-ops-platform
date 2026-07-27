@@ -1,11 +1,6 @@
 name: Infrastructure - Update Production
 
 on:
-  pull_request:
-    paths:
-      - "infra/**"
-      - "apps/event-worker/**"
-      - ".github/workflows/infrastructure.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -59,7 +54,7 @@ jobs:
 
   update:
     name: Update production infrastructure
-    if: github.event_name == 'workflow_dispatch' && inputs.confirmation == 'UPDATE'
+    if: inputs.confirmation == 'UPDATE'
     needs: validate
     runs-on: ubuntu-latest
     environment: production

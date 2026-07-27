@@ -73,8 +73,8 @@ When introducing or changing the BGE models, deploy production in this order:
 2. Run **Infrastructure - Update Production** for `production` with confirmation
    `UPDATE`. This updates the task role and task-definition
    model paths while keeping model-server at 4 vCPU / 16 GiB.
-3. Rerun **Python Model Server - Amazon ECS** if its push-triggered run was
-   blocked before the infrastructure update completed.
+3. Manually run **Python Model Server - Amazon ECS** after the infrastructure
+   update when model-server code or model artifacts changed.
 4. Confirm ECS service stability, then rerun **Model API - Amazon ECS** if
    necessary.
 

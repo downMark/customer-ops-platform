@@ -1,15 +1,6 @@
 name: Event Worker - AWS Lambda
 
 on:
-  pull_request:
-    paths:
-      - "apps/event-worker/**"
-      - ".github/workflows/event-worker-lambda.yml"
-  push:
-    branches: [main]
-    paths:
-      - "apps/event-worker/**"
-      - ".github/workflows/event-worker-lambda.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -42,7 +33,6 @@ jobs:
       - run: cargo test
 
   deploy:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ubuntu-latest
     environment: production

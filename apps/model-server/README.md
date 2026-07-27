@@ -84,4 +84,4 @@ Security Group 访问 TCP 8000。API Key 是第二层防护，不能代替网络
 
 提交 `apps/model-server/**` 到 `main` 后，
 `.github/workflows/model-server-ecs.yml` 会构建 CPU 镜像、推送 ECR，并滚动
-更新已有 ECS Service。Pull Request 只安装依赖并执行测试。
+更新已有 ECS Service。工作流仅支持手动运行，Pull Request 和 push 均不会触发。

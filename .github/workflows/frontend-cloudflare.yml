@@ -1,16 +1,6 @@
 name: Frontend - Cloudflare Workers
 
 on:
-  pull_request:
-    paths:
-      - "apps/frontend/**"
-      - ".github/workflows/frontend-cloudflare.yml"
-  push:
-    branches:
-      - main
-    paths:
-      - "apps/frontend/**"
-      - ".github/workflows/frontend-cloudflare.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -22,7 +12,7 @@ on:
           - production
 
 concurrency:
-  group: frontend-${{ github.event_name == 'workflow_dispatch' && inputs.environment || github.ref }}
+  group: frontend-production
   cancel-in-progress: false
 
 permissions:
@@ -66,20 +56,19 @@ jobs:
         run: pnpm check:worker
 
   deploy:
-    name: Deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    name: Deploy production
     needs: validate
     runs-on: ubuntu-latest
     environment:
-      name: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+      name: production
     permissions:
       contents: read
       id-token: write
     env:
-      DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+      DEPLOY_ENV: production
       AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
-      RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
+      RUNTIME_STACK: customer-ops-production-runtime
       VITE_CHAT_API_BASE_URL: /model-api
     steps:
       - name: Checkout

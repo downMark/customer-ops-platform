@@ -286,10 +286,9 @@ POST http://127.0.0.1:8000/v1/rerank
 - `.github/workflows/model-server-ecs.yml`：测试并构建 CPU 推理容器，推送
   ECR，并滚动部署私有 Fargate Service。GGUF 不进入镜像。
 
-Pull Request 只执行检查，不发布。合并到 `main` 且对应应用目录有变更时自动
-发布 `production`；也可以从 Actions 页面手动运行 `production`。建议给 GitHub
-`production` Environment 配置 required reviewers，
-让主分支发布在实际执行前仍需人工批准。
+所有工作流都只支持从 Actions 页面通过 `workflow_dispatch` 手动运行；
+Pull Request 和 push 均不会自动执行检查或发布。建议给 GitHub `production`
+Environment 配置 required reviewers，形成“手动启动 + 人工审批”双重门禁。
 
 ### 8.2 GitHub Environments
 

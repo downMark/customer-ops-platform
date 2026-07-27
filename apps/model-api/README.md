@@ -89,4 +89,4 @@ Task Definition 必须配置：
 
 提交 `apps/model-api/**` 到 `main` 后，
 `.github/workflows/model-api-ecs.yml` 会构建不可变 SHA 镜像、推送 ECR，
-并滚动更新已有 ECS Service。Pull Request 只执行类型检查、测试和构建。
+并滚动更新已有 ECS Service。工作流仅支持手动运行，Pull Request 和 push 均不会触发。

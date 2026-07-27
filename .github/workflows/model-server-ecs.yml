@@ -1,16 +1,6 @@
 name: Python Model Server - Amazon ECS
 
 on:
-  pull_request:
-    paths:
-      - "apps/model-server/**"
-      - ".github/workflows/model-server-ecs.yml"
-  push:
-    branches:
-      - main
-    paths:
-      - "apps/model-server/**"
-      - ".github/workflows/model-server-ecs.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -22,7 +12,7 @@ on:
           - production
 
 concurrency:
-  group: model-server-${{ github.event_name == 'workflow_dispatch' && inputs.environment || github.ref }}
+  group: model-server-production
   cancel-in-progress: false
 
 permissions:
@@ -59,20 +49,19 @@ jobs:
         run: uv run pytest
 
   deploy:
-    name: Deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    name: Deploy production
     needs: validate
     runs-on: ubuntu-latest
     environment:
-      name: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+      name: production
     permissions:
       contents: read
       id-token: write
     env:
       AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
-      FOUNDATION_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-foundation
-      RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
+      FOUNDATION_STACK: customer-ops-production-foundation
+      RUNTIME_STACK: customer-ops-production-runtime
       MODEL_BUCKET_NAME: ${{ vars.MODEL_BUCKET_NAME || 'customer-ops-models' }}
       EMBEDDING_MODEL_PREFIX: ${{ vars.EMBEDDING_MODEL_PREFIX || 'models/customer-ops/bge-m3-onnx/' }}
       RERANK_MODEL_PREFIX: ${{ vars.RERANK_MODEL_PREFIX || 'models/customer-ops/bge-reranker-v2-m3-onnx/' }}
