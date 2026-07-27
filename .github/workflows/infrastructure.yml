@@ -6,10 +6,9 @@ on:
       environment:
         description: GitHub Environment and deployment target
         required: true
-        default: staging
+        default: production
         type: choice
         options:
-          - staging
           - production
       confirmation:
         description: Type PROVISION to create/update billable AWS resources
@@ -31,6 +30,8 @@ env:
   RUNTIME_STACK: customer-ops-${{ inputs.environment }}-runtime
   MODEL_BUCKET_NAME: ${{ vars.MODEL_BUCKET_NAME || 'customer-ops-models' }}
   MODEL_OBJECT_KEY: ${{ vars.MODEL_OBJECT_KEY || 'models/customer-ops/customer-ops-q4_k_m.gguf' }}
+  EMBEDDING_MODEL_PREFIX: ${{ vars.EMBEDDING_MODEL_PREFIX || 'models/customer-ops/bge-m3-onnx/' }}
+  RERANK_MODEL_PREFIX: ${{ vars.RERANK_MODEL_PREFIX || 'models/customer-ops/bge-reranker-v2-m3-onnx/' }}
 
 jobs:
   provision:
@@ -59,11 +60,28 @@ jobs:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify model artifact
+      - name: Validate CloudFormation templates
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infra/cloudformation/foundation.yml \
+            >/dev/null
+          aws cloudformation validate-template \
+            --template-body file://infra/cloudformation/runtime.yml \
+            >/dev/null
+
+      - name: Verify model artifacts
         run: |
           aws s3api head-object \
             --bucket "${MODEL_BUCKET_NAME}" \
             --key "${MODEL_OBJECT_KEY}"
+          for prefix in "${EMBEDDING_MODEL_PREFIX}" "${RERANK_MODEL_PREFIX}"; do
+            for artifact in SHA256SUMS model.onnx model.onnx_data tokenizer.json; do
+              aws s3api head-object \
+                --bucket "${MODEL_BUCKET_NAME}" \
+                --key "${prefix}${artifact}" \
+                >/dev/null
+            done
+          done
 
       - name: Deploy foundation stack
         env:
@@ -80,7 +98,9 @@ jobs:
               DatabaseUrl="${DATABASE_URL}" \
               FrontendOrigin="${FRONTEND_ORIGIN}" \
               ModelBucketName="${MODEL_BUCKET_NAME}" \
-              ModelObjectKey="${MODEL_OBJECT_KEY}"
+              ModelObjectKey="${MODEL_OBJECT_KEY}" \
+              EmbeddingModelPrefix="${EMBEDDING_MODEL_PREFIX}" \
+              RerankModelPrefix="${RERANK_MODEL_PREFIX}"
 
       - name: Read foundation outputs
         id: foundation
@@ -192,6 +212,8 @@ jobs:
               ModelServerImageUri="${MODEL_SERVER_REPOSITORY_URI}:${GITHUB_SHA}" \
               ModelBucketName="${MODEL_BUCKET_NAME}" \
               ModelObjectKey="${MODEL_OBJECT_KEY}" \
+              EmbeddingModelPrefix="${EMBEDDING_MODEL_PREFIX}" \
+              RerankModelPrefix="${RERANK_MODEL_PREFIX}" \
               ModelSha256="${MODEL_SHA256}"
 
       - name: Read runtime endpoints
@@ -265,5 +287,5 @@ jobs:
             echo "- Backend API: \`${BACKEND_API_URL}\`"
             echo "- Model API origin: \`${MODEL_API_URL}\`"
             echo "- Frontend URL: \`${{ steps.cloudflare.outputs.deployment-url }}\`"
-            echo "- Model inference: CPU Fargate (4 vCPU / 16 GiB)"
+            echo "- Model inference: GGUF + BGE-M3 + BGE Reranker on CPU Fargate (4 vCPU / 16 GiB)"
           } >> "${GITHUB_STEP_SUMMARY}"

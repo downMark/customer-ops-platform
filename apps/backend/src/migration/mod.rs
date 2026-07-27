@@ -7,6 +7,7 @@ mod m20260722_000002_create_conversation_completions;
 mod m20260723_000003_create_users;
 mod m20260723_000004_seed_admin_orders;
 mod m20260725_000005_create_products_and_order_items;
+mod m20260727_000006_create_knowledge_chunks;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260723_000003_create_users::Migration),
             Box::new(m20260723_000004_seed_admin_orders::Migration),
             Box::new(m20260725_000005_create_products_and_order_items::Migration),
+            Box::new(m20260727_000006_create_knowledge_chunks::Migration),
         ]
     }
 }

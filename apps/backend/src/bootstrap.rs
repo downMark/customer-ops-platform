@@ -10,11 +10,13 @@ use crate::application::get_order::GetOrder;
 use crate::application::list_orders::ListOrders;
 use crate::application::login::Login;
 use crate::application::products::Products;
+use crate::application::search_knowledge::SearchKnowledge;
 use crate::config::Config;
 use crate::domain::event::EventPublisher;
 use crate::infra::conversation_repo::SeaOrmConversationRepository;
 use crate::infra::db;
 use crate::infra::jwt::JwtVerifier;
+use crate::infra::knowledge_repo::SeaOrmKnowledgeRepository;
 use crate::infra::order_repo::SeaOrmOrderRepository;
 use crate::infra::password::Argon2PasswordVerifier;
 use crate::infra::product_repo::SeaOrmProductRepository;
@@ -31,28 +33,30 @@ pub(crate) async fn build_state(config: &Config) -> Result<AppState, StartupErro
     let order_repo = Arc::new(SeaOrmOrderRepository::new(connection.clone()));
     let conversation_repo = Arc::new(SeaOrmConversationRepository::new(connection.clone()));
     let user_repo = Arc::new(SeaOrmUserRepository::new(connection.clone()));
+    let knowledge_repo = Arc::new(SeaOrmKnowledgeRepository::new(connection.clone()));
     let product_repo = Arc::new(SeaOrmProductRepository::new(connection));
     let jwt = Arc::new(JwtVerifier::with_ttl(
         &config.jwt_secret,
         config.jwt_ttl_seconds,
     ));
 
-    Ok(AppState::new(
-        Arc::new(GetOrder::new(order_repo.clone())),
-        Arc::new(ListOrders::new(order_repo.clone())),
-        Arc::new(CreateOrder::new(order_repo)),
-        Arc::new(CompleteConversation::new(
+    Ok(AppState {
+        get_order: Arc::new(GetOrder::new(order_repo.clone())),
+        list_orders: Arc::new(ListOrders::new(order_repo.clone())),
+        create_order: Arc::new(CreateOrder::new(order_repo)),
+        complete_conversation: Arc::new(CompleteConversation::new(
             conversation_repo,
             build_publisher(config).await,
         )),
-        Arc::new(Login::new(
+        login: Arc::new(Login::new(
             user_repo,
             Arc::new(Argon2PasswordVerifier),
             jwt.clone(),
         )),
-        jwt,
-        Arc::new(Products::new(product_repo)),
-    ))
+        verifier: jwt,
+        products: Arc::new(Products::new(product_repo)),
+        search_knowledge: Arc::new(SearchKnowledge::new(knowledge_repo)),
+    })
 }
 
 /// 有 `SNS_TOPIC_ARN` 且启用 `sns` feature 时使用真实 SNS，否则回退 no-op。

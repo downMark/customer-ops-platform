@@ -6,11 +6,25 @@ import {
   type LoginResult,
 } from "../contracts/auth";
 import { orderSchema, type Order } from "../contracts/order";
+import {
+  knowledgeSearchResponseSchema,
+  type KnowledgeChunk,
+  type KnowledgeFilters,
+} from "../contracts/knowledge";
 import { AppError } from "../lib/errors";
 import { withTimeout } from "../lib/signals";
 
 export type GetOrderInput = {
   orderId: string;
+  authorization: string;
+  traceId: string;
+  signal?: AbortSignal;
+};
+
+export type SearchKnowledgeInput = {
+  vector: number[];
+  topK: number;
+  filters?: KnowledgeFilters;
   authorization: string;
   traceId: string;
   signal?: AbortSignal;
@@ -152,6 +166,63 @@ export class BackendClient {
       );
     }
     return parsed.data.data;
+  }
+
+  async searchKnowledge(
+    input: SearchKnowledgeInput,
+  ): Promise<KnowledgeChunk[]> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        `${this.baseUrl}/api/knowledge/search`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            authorization: input.authorization,
+            "content-type": "application/json",
+            "x-trace-id": input.traceId,
+          },
+          body: JSON.stringify({
+            vector: input.vector,
+            topK: input.topK,
+            ...(input.filters ? { filters: input.filters } : {}),
+          }),
+          signal: withTimeout(this.timeoutMs, input.signal),
+        },
+      );
+    } catch (error) {
+      throw new AppError(
+        "KNOWLEDGE_SERVICE_UNAVAILABLE",
+        "知识检索服务暂时不可用",
+        503,
+        true,
+        { cause: error },
+      );
+    }
+
+    if (!response.ok) {
+      throw new AppError(
+        "KNOWLEDGE_SERVICE_UNAVAILABLE",
+        "知识检索服务暂时不可用",
+        response.status >= 500 ? 503 : 502,
+        true,
+      );
+    }
+    const payload: unknown = await response.json().catch(() => null);
+    const parsed = backendEnvelopeSchema(
+      knowledgeSearchResponseSchema,
+    ).safeParse(payload);
+    if (!parsed.success) {
+      throw new AppError(
+        "KNOWLEDGE_SERVICE_UNAVAILABLE",
+        "知识检索服务返回了无效数据",
+        502,
+        true,
+        { cause: parsed.error },
+      );
+    }
+    return parsed.data.data.items;
   }
 
   async isHealthy(signal?: AbortSignal): Promise<boolean> {

@@ -19,6 +19,14 @@ Parameters:
   ModelObjectKey:
     Type: String
     Default: models/customer-ops/customer-ops-q4_k_m.gguf
+  EmbeddingModelPrefix:
+    Type: String
+    Default: models/customer-ops/bge-m3-onnx/
+    AllowedPattern: "^models/customer-ops/[A-Za-z0-9._/-]+/$"
+  RerankModelPrefix:
+    Type: String
+    Default: models/customer-ops/bge-reranker-v2-m3-onnx/
+    AllowedPattern: "^models/customer-ops/[A-Za-z0-9._/-]+/$"
   ModelSha256:
     Type: String
     Default: ""
@@ -306,6 +314,26 @@ Resources:
               Value: !Ref ModelSha256
             - Name: MODEL_PATH
               Value: /models/customer-ops-q4_k_m.gguf
+            - Name: EMBEDDING_MODEL_S3_URI
+              Value: !Sub s3://${ModelBucketName}/${EmbeddingModelPrefix}
+            - Name: RERANK_MODEL_S3_URI
+              Value: !Sub s3://${ModelBucketName}/${RerankModelPrefix}
+            - Name: EMBEDDING_MODEL_PATH
+              Value: /models/bge-m3-onnx/model.onnx
+            - Name: RERANK_MODEL_PATH
+              Value: /models/bge-reranker-v2-m3-onnx/model.onnx
+            - Name: EMBEDDING_MODEL_ALIAS
+              Value: bge-m3
+            - Name: RERANK_MODEL_ALIAS
+              Value: bge-reranker-v2-m3
+            - Name: EMBEDDING_DIM
+              Value: "1024"
+            - Name: EMBEDDING_MAX_LENGTH
+              Value: "1024"
+            - Name: RERANK_MAX_LENGTH
+              Value: "1024"
+            - Name: ONNX_THREADS
+              Value: "1"
             - Name: MODEL_ALIAS
               Value: customer-ops
             - Name: MODEL_HOST
@@ -428,11 +456,27 @@ Resources:
               Value: !Sub http://${ModelServerLoadBalancer.DNSName}:8000/v1
             - Name: MODEL_SERVER_MODEL
               Value: customer-ops
+            - Name: EMBEDDING_MODEL
+              Value: bge-m3
+            - Name: RERANK_MODEL
+              Value: bge-reranker-v2-m3
             - Name: BACKEND_BASE_URL
               Value: !Sub https://${BackendRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${Environment}
             - Name: CORS_ORIGINS
               Value:
                 Fn::ImportValue: !Sub customer-ops-${Environment}-frontend-origin
+            - Name: RAG_ENABLED
+              Value: "true"
+            - Name: RAG_RETRIEVAL_TOP_K
+              Value: "20"
+            - Name: RAG_FINAL_TOP_K
+              Value: "3"
+            - Name: RAG_MIN_RERANK_SCORE
+              Value: "0.1"
+            - Name: RAG_TIMEOUT_MS
+              Value: "8000"
+            - Name: RAG_MAX_CONTEXT_CHARS
+              Value: "6000"
           Secrets:
             - Name: MODEL_SERVER_API_KEY
               ValueFrom:

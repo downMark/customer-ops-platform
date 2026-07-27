@@ -2,6 +2,10 @@
 
 FastAPI 推理服务，使用 `llama-cpp-python` 直接加载客服 GGUF 模型，不依赖 Ollama。
 
+同一进程通过 ONNX Runtime 加载 `bge-m3` 和
+`bge-reranker-v2-m3`，提供知识检索所需的 embedding 与 rerank。三个引擎
+共享推理锁，避免在 16 GiB Task 中并发产生峰值工作区。
+
 ## 模型
 
 默认直接加载：
@@ -26,6 +30,8 @@ uv run --env-file .env python -m app
 - `GET /health`：模型服务健康状态。
 - `GET /v1/models`：OpenAI-compatible 模型列表。
 - `POST /v1/chat/completions`：OpenAI-compatible 对话与流式生成。
+- `POST /v1/embeddings`：生成 1024 维归一化向量。
+- `POST /v1/rerank`：对 query/document pairs 进行相关性排序。
 - `GET /docs`：FastAPI OpenAPI 页面。
 
 除 `/health` 和 `/docs` 外，请求需要：
@@ -57,6 +63,10 @@ Task Definition 至少配置：
 ```text
 MODEL_S3_URI=s3://customer-ops-models/models/customer-ops/customer-ops-q4_k_m.gguf
 MODEL_PATH=/models/customer-ops-q4_k_m.gguf
+EMBEDDING_MODEL_S3_URI=s3://customer-ops-models/models/customer-ops/bge-m3-onnx/
+RERANK_MODEL_S3_URI=s3://customer-ops-models/models/customer-ops/bge-reranker-v2-m3-onnx/
+EMBEDDING_MODEL_PATH=/models/bge-m3-onnx/model.onnx
+RERANK_MODEL_PATH=/models/bge-reranker-v2-m3-onnx/model.onnx
 MODEL_HOST=0.0.0.0
 MODEL_PORT=8000
 MODEL_GPU_LAYERS=0
@@ -64,8 +74,9 @@ MODEL_THREADS=4
 MODEL_SERVER_API_KEY=<Secrets Manager 注入>
 ```
 
-可选配置 `MODEL_SHA256`，启动时会在加载模型前核对摘要。Task Role 只需要
-对上述单个对象的 `s3:GetObject` 权限。
+可选配置 `MODEL_SHA256`，启动时会在加载 GGUF 前核对摘要。两个 ONNX
+目录使用各自的 `SHA256SUMS` 逐文件校验。Task Role 需要限定到
+`models/customer-ops/*` 的对象读取和同前缀 ListBucket 权限。
 
 Python Service 仅连接内部 NLB。Fargate Task 在当前无 NAT 的公共子网中分配
 公网 IP 以访问 ECR 和 S3，但 Security Group 入站只允许 Mastra Task

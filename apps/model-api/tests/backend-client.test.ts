@@ -140,4 +140,43 @@ describe("BackendClient", () => {
       status: 502,
     });
   });
+
+  it("检索知识并透传身份、trace id 和过滤条件", async () => {
+    const chunk = {
+      id: 1,
+      documentId: "refrigerator-guide",
+      chunkIndex: 0,
+      content: "先检查电源和温控设置。",
+      source: "knowledge/appliances/refrigerator.md",
+      metadata: { productId: "PROD-006", category: "refrigerator" },
+      score: 0.91,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(ok({ items: [chunk] })));
+    const client = new BackendClient({
+      baseUrl: "http://backend.test",
+      fetchImpl,
+    });
+
+    await expect(
+      client.searchKnowledge({
+        vector: Array.from({ length: 1024 }, () => 0.01),
+        topK: 20,
+        filters: { productId: "PROD-006" },
+        authorization: "Bearer test-token",
+        traceId: "trace-rag",
+      }),
+    ).resolves.toEqual([chunk]);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://backend.test/api/knowledge/search",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          authorization: "Bearer test-token",
+          "x-trace-id": "trace-rag",
+        }),
+      }),
+    );
+  });
 });

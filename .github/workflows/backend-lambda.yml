@@ -16,10 +16,9 @@ on:
       environment:
         description: GitHub Environment containing the AWS deployment configuration
         required: true
-        default: staging
+        default: production
         type: choice
         options:
-          - staging
           - production
 
 concurrency:

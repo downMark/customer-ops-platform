@@ -68,6 +68,7 @@ cargo check --features lambda --bin lambda  # 检查 Lambda 入口
 cargo fmt --all                             # 格式化
 cargo clippy --all-targets -- -D warnings   # Lint
 cargo test                                  # 测试
+cargo run --bin migrate                     # 只执行迁移，不启动 HTTP
 ```
 
 项目位于外接磁盘，部分 macOS 外接盘文件系统不支持 Cargo 增量缓存使用的硬链接。
@@ -112,6 +113,12 @@ Lambda 环境至少配置：
 - `CORS_ORIGINS`：允许直接调用订单接口的 Cloudflare 前端 Origin，逗号分隔。
 - `DB_MAX_CONNECTIONS`：建议 1–2，避免多个冷启动放大数据库连接数。
 - `SNS_TOPIC_ARN`：启用 `sns` feature 时配置，并给执行角色 `sns:Publish`。
+
+## 知识检索
+
+`POST /api/knowledge/search` 接收 1024 维向量、`topK` 和可选的
+`productId/category/source` 过滤条件，返回统一响应封装中的相似知识片段。
+底层使用 Neon pgvector cosine HNSW 索引，向量和过滤值均使用参数绑定。
 
 Lambda 初始化阶段只执行一次依赖装配和数据库迁移，随后由同一执行环境复用
 连接池与 Router。API Gateway 采用 Lambda proxy integration，并为所有路径

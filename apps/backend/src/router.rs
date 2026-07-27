@@ -63,6 +63,7 @@ fn build_base_router(state: AppState) -> Router {
             "/api/conversations/{conversation_id}/complete",
             post(handler::conversations::complete_conversation),
         )
+        .route("/api/knowledge/search", post(handler::knowledge::search))
         .route("/api/health", get(handler::health::health))
         .layer(axum::middleware::from_fn(handler::middleware::trace_id))
         .layer(TraceLayer::new_for_http())
@@ -92,6 +93,7 @@ mod tests {
     use crate::application::list_orders::ListOrders;
     use crate::application::login::Login;
     use crate::application::products::Products;
+    use crate::application::search_knowledge::SearchKnowledge;
     use crate::domain::auth::{
         AuthError, AuthServiceError, AuthUser, IssuedToken, PasswordVerifier, TokenIssuer,
         TokenVerifier,
@@ -100,6 +102,7 @@ mod tests {
         ConversationCompletion, ConversationRepository, SaveOutcome,
     };
     use crate::domain::event::{ConversationCompleted, EventPublisher, PublishError};
+    use crate::domain::knowledge::{KnowledgeChunk, KnowledgeFilter, KnowledgeRepository};
     use crate::domain::order::{NewOrder, Order, OrderFilter, OrderItem};
     use crate::domain::product::Product;
     use crate::domain::repository::{OrderRepository, ProductRepository, RepoError};
@@ -253,6 +256,31 @@ mod tests {
         }
     }
 
+    struct FakeKnowledgeRepository;
+
+    #[async_trait]
+    impl KnowledgeRepository for FakeKnowledgeRepository {
+        async fn search(
+            &self,
+            _vector: &[f32],
+            _top_k: u64,
+            _filter: &KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeChunk>, RepoError> {
+            Ok(vec![KnowledgeChunk {
+                id: 1,
+                document_id: "refrigerator-guide".into(),
+                chunk_index: 0,
+                content: "先检查冰箱电源和温控设置。".into(),
+                source: "knowledge/appliances/refrigerator.md".into(),
+                metadata: json!({
+                    "productId": "PROD-006",
+                    "category": "refrigerator"
+                }),
+                score: 0.91,
+            }])
+        }
+    }
+
     struct FakeUserRepository;
 
     #[async_trait]
@@ -289,22 +317,23 @@ mod tests {
 
     fn test_router() -> Router {
         let order_repo = Arc::new(FakeOrderRepository);
-        build_router(AppState::new(
-            Arc::new(GetOrder::new(order_repo.clone())),
-            Arc::new(ListOrders::new(order_repo.clone())),
-            Arc::new(CreateOrder::new(order_repo)),
-            Arc::new(CompleteConversation::new(
+        build_router(AppState {
+            get_order: Arc::new(GetOrder::new(order_repo.clone())),
+            list_orders: Arc::new(ListOrders::new(order_repo.clone())),
+            create_order: Arc::new(CreateOrder::new(order_repo)),
+            complete_conversation: Arc::new(CompleteConversation::new(
                 Arc::new(FakeConversationRepository),
                 Arc::new(FakePublisher),
             )),
-            Arc::new(Login::new(
+            login: Arc::new(Login::new(
                 Arc::new(FakeUserRepository),
                 Arc::new(FakePasswordVerifier),
                 Arc::new(FakeTokenIssuer),
             )),
-            Arc::new(FakeVerifier),
-            Arc::new(Products::new(Arc::new(FakeProductRepository))),
-        ))
+            verifier: Arc::new(FakeVerifier),
+            products: Arc::new(Products::new(Arc::new(FakeProductRepository))),
+            search_knowledge: Arc::new(SearchKnowledge::new(Arc::new(FakeKnowledgeRepository))),
+        })
     }
 
     async fn json_body(response: axum::response::Response) -> Value {
@@ -335,6 +364,34 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["code"], 200);
         assert_eq!(body["data"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn knowledge_search_validates_auth_and_returns_matches() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/knowledge/search")
+                    .header("authorization", "Bearer valid-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "vector": vec![0.01_f32; 1024],
+                            "topK": 20,
+                            "filters": {"productId": "PROD-006"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["items"][0]["documentId"], "refrigerator-guide");
+        assert_eq!(body["data"]["items"][0]["score"], 0.91);
     }
 
     #[tokio::test]

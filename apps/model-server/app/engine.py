@@ -17,8 +17,8 @@ class ChatEngine(Protocol):
 
 
 class LlamaCppEngine:
-    def __init__(self, settings: Settings) -> None:
-        settings.validate()
+    def __init__(self, settings: Settings, inference_lock: Lock | None = None) -> None:
+        settings.validate_chat()
         kwargs: dict[str, Any] = {
             "model_path": str(settings.model_path),
             "n_ctx": settings.context_size,
@@ -30,7 +30,7 @@ class LlamaCppEngine:
 
         self._llm = Llama(**kwargs)
         self._settings = settings
-        self._lock = Lock()
+        self._lock = inference_lock or Lock()
 
     def _arguments(self, request: ChatCompletionRequest) -> dict[str, Any]:
         arguments: dict[str, Any] = {

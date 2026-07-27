@@ -15,6 +15,7 @@ pub mod state;
 
 use axum::Router;
 use sea_orm::DbErr;
+use sea_orm_migration::MigratorTrait;
 
 pub use config::Config;
 
@@ -36,6 +37,13 @@ pub enum StartupError {
 pub async fn build_app(config: &Config) -> Result<Router, StartupError> {
     let state = bootstrap::build_state(config).await?;
     router::build_router_with_cors(state, &config.cors_origins)
+}
+
+/// 仅连接数据库并执行待应用的内联迁移，不启动 HTTP 服务。
+pub async fn migrate_database(config: &Config) -> Result<(), StartupError> {
+    let connection = infra::db::connect(config).await?;
+    migration::Migrator::up(&connection, None).await?;
+    Ok(())
 }
 
 /// 启动本地 Axum 服务。

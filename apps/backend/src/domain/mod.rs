@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod conversation;
 pub mod event;
+pub mod knowledge;
 pub mod order;
 pub mod product;
 pub mod repository;

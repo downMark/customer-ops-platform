@@ -4,7 +4,7 @@
 
 本项目实现一个可以查询实时订单信息的智能客服系统。
 
-用户在前端聊天页面提交问题和订单号；前端调用 Mastra 服务；Mastra 通过 HTTP 调用后端订单服务取得可信的实时订单数据，再将用户问题、订单数据和客服规则交给 FastAPI 模型服务。FastAPI 使用 `llama-cpp-python` 直接加载自训练产物 `customer-ops-q4_k_m.gguf`，最后把模型回答流式返回前端。
+用户在前端聊天页面提交问题和订单号；前端调用 Mastra 服务；Mastra 并行查询实时订单数据和知识库，再将用户问题、订单数据、重排后的参考资料和客服规则交给 FastAPI 模型服务。FastAPI 同时加载自训练产物 `customer-ops-q4_k_m.gguf`、BGE-M3 ONNX 和 BGE Reranker ONNX，最后把模型回答流式返回前端。知识检索失败时降级为无参考资料回答，不中断客服聊天。
 
 项目还必须完成三项 AWS 技术任务：
 
@@ -21,6 +21,8 @@
 - Mastra 对话编排服务。
 - 通过 FastAPI + `llama-cpp-python` 直接调用 GGUF 自训练模型。
 - 通过后端 HTTP API 查询订单。
+- 使用 pgvector、BGE-M3 和 BGE Reranker 完成知识检索与重排。
+- 独立、幂等的 Markdown 知识摄取工具。
 - 后端执行身份校验、订单归属校验和数据库查询。
 - 保存必要的对话完成记录。
 - 对话完成事件通过 SNS 分发到 SQS。
@@ -33,7 +35,6 @@
 
 - 完整客服工作台和人工接管系统。
 - 多租户管理后台。
-- RAG、知识库和向量数据库。
 - MCP Server 和高风险写操作。
 - 退款、取消订单、修改地址等实际业务操作。
 - 多模型路由和云端备用模型。
@@ -51,6 +52,8 @@ customer-ops-platform/
 │   ├── model-server/   # FastAPI 直接加载 GGUF
 │   ├── backend/        # 订单 API、鉴权和数据库访问
 │   └── event-worker/   # SQS 消费者
+├── knowledge/          # 客服知识 Markdown
+├── tools/              # 离线知识摄取工具
 ├── infra/              # AWS CloudFormation 与部署脚本
 ├── docs/
 │   ├── README.md
@@ -80,10 +83,13 @@ flowchart LR
     Frontend -->|SSE 聊天| Mastra[model-api\nMastra]
     Frontend -->|订单数据| Backend
     Mastra -->|HTTP 查询订单| Backend[backend\n订单服务]
-    Backend --> Database[(订单数据库)]
+    Mastra -->|生成向量和重排| ModelServer[FastAPI model-server]
+    Mastra -->|向量检索| Backend
+    Backend --> Database[(Neon PostgreSQL\n订单 + pgvector 知识库)]
     Backend -->|结构化订单 JSON| Mastra
-    Mastra -->|OpenAI 兼容 API| ModelServer[FastAPI model-server]
+    Backend -->|知识候选| Mastra
     ModelServer -->|llama-cpp-python| GGUF[customer-ops-q4_k_m.gguf]
+    ModelServer -->|ONNX Runtime| BGE[BGE-M3 + Reranker]
     GGUF -->|生成内容| Mastra
     Mastra -->|SSE 流式回复| Frontend
     Backend --> SNS[SNS\ndomain-events]
@@ -100,9 +106,9 @@ flowchart LR
 | 服务           | 职责                                                         | 不负责                           |
 | -------------- | ------------------------------------------------------------ | -------------------------------- |
 | `frontend`     | 调用 Mastra 聊天接口、调用 Backend 订单接口并展示数据         | 不直接访问数据库或 Python 模型服务 |
-| `model-api`    | Mastra 编排、调用后端、构造模型上下文、调用模型服务、流式响应 | 不直接访问数据库，不加载模型权重 |
-| `model-server` | FastAPI 接口、加载 GGUF、执行推理和输出 OpenAI 兼容流        | 不查询订单，不包含业务权限规则   |
-| `backend`      | 验证身份、校验订单归属、查询订单、保存业务记录、发布领域事件 | 不负责生成客服回答               |
+| `model-api`    | Mastra 编排、订单与 RAG 并行查询、构造上下文、流式响应       | 不直接访问数据库，不加载模型权重 |
+| `model-server` | 加载 GGUF/BGE ONNX，提供生成、embedding 和 rerank            | 不查询订单，不包含业务权限规则   |
+| `backend`      | 鉴权、订单查询、pgvector 知识检索、业务记录和领域事件        | 不负责生成客服回答               |
 | `event-worker` | 消费质量评估和分析任务，处理重试、幂等和部分批次失败         | 不参与用户同步等待链路           |
 | `infra`        | 创建、更新和删除 AWS 资源，配置告警与灰度发布                | 不包含业务代码                   |
 
@@ -110,11 +116,11 @@ flowchart LR
 
 1. 用户在前端输入订单号和问题。
 2. 前端创建 `trace_id` 或接收入口返回的 `trace_id`，调用 `model-api`。
-3. `model-api` 校验请求格式，并把用户身份凭证和 `trace_id` 转发给 `backend`。
-4. `backend` 从可信身份中确定用户，校验该用户是否有权查看目标订单。
-5. `backend` 查询数据库并返回结构化订单 JSON；未找到或无权访问时返回明确错误，不返回其他客户的数据。
-6. `model-api` 将用户问题、订单 JSON 和客服规则提交给 FastAPI `model-server`。
-7. `model-server` 使用 `llama-cpp-python` 直接调用 `customer-ops-q4_k_m.gguf`。
+3. `model-api` 校验请求格式，并行启动订单查询和 RAG 检索。
+4. 订单分支把用户凭证和 `trace_id` 转发给 `backend`，由后端校验订单归属并返回结构化订单 JSON。
+5. RAG 分支调用 BGE-M3 生成 1024 维向量，经 `backend` 在 Neon pgvector 中取 top-20，再由 BGE Reranker 筛到 top-3。
+6. `model-api` 将用户问题、订单 JSON、参考资料和客服规则提交给 FastAPI `model-server`；订单实时数据的优先级最高。
+7. `model-server` 使用 `llama-cpp-python` 调用 `customer-ops-q4_k_m.gguf` 生成回答。
 8. 模型只负责组织客服回答，不负责决定数据权限，也不能声称执行了退款、取消订单等操作。
 9. `model-api` 使用 SSE 将生成内容流式返回前端。
 10. 对话成功结束后，`backend` 保存完成记录并向 SNS 发布 `ConversationCompleted` 事件。
@@ -124,6 +130,7 @@ flowchart LR
 - 后端超时：不调用模型猜测订单状态，返回“订单服务暂时不可用”。
 - 订单不存在：明确返回未找到，不提供推测结果。
 - 无权访问：返回统一权限错误，不泄露订单是否属于其他用户。
+- 知识检索超时、503 或返回无效数据：降级为空参考资料，聊天继续。
 - FastAPI 模型服务不可用：返回可重试错误和 `trace_id`。
 - 用户停止生成：前端取消请求，`model-api` 中止模型服务调用。
 - 客户端断线：停止本次流；首版不保证断点续传。
@@ -234,10 +241,12 @@ GET /api/health
 
 模型中只训练客服语气、回答结构、业务规则和异常处理方式。订单、物流、退款和库存等实时事实必须由后端查询，不得训练进模型或由模型猜测。
 
-Mastra 使用 FastAPI 的 OpenAI 兼容接口：
+Mastra 使用 FastAPI 的生成、向量和重排接口：
 
 ```text
-http://127.0.0.1:8000/v1
+POST http://127.0.0.1:8000/v1/chat/completions
+POST http://127.0.0.1:8000/v1/embeddings
+POST http://127.0.0.1:8000/v1/rerank
 ```
 
 生产环境中 `model-server` 运行在私有 CPU Fargate Service 中，必须配置服务
@@ -273,15 +282,13 @@ http://127.0.0.1:8000/v1
   ECR，并滚动部署私有 Fargate Service。GGUF 不进入镜像。
 
 Pull Request 只执行检查，不发布。合并到 `main` 且对应应用目录有变更时自动
-发布 `production`；也可以从 Actions 页面手动运行并选择 `staging` 或
-`production`。建议给 GitHub `production` Environment 配置 required reviewers，
+发布 `production`；也可以从 Actions 页面手动运行 `production`。建议给 GitHub
+`production` Environment 配置 required reviewers，
 让主分支发布在实际执行前仍需人工批准。
 
 ### 8.2 GitHub Environments
 
-在 GitHub 仓库的 **Settings → Environments** 创建 `staging` 和
-`production`，分别配置以下值。不同环境可以指向完全独立的 Worker、Lambda
-和 API 地址。
+在 GitHub 仓库的 **Settings → Environments** 创建 `production` 并配置以下值。
 
 Frontend Environment variables：
 
@@ -381,7 +388,7 @@ Mastra ECS          ──TCP 8000──> private Python model-server
    `MODEL_SERVER_API_KEY`；Mastra Task Definition 配置私有
    `MODEL_SERVER_BASE_URL`、同一 API Key、Backend URL 与前端 CORS。
 5. 在 AWS 创建 GitHub OIDC Provider 与部署角色，并限制仓库/Environment。
-6. 手动运行 staging workflow 验证健康检查，再允许 production 发布。
+6. 手动运行 production workflow，并通过 Environment reviewer 审批控制发布。
 
 Backend workflow 的 `update-function-code` 不修改函数环境变量、内存、超时、
 VPC 或 API Gateway Canary 配置。Canary 流量调整由基础设施发布流程单独执行，
@@ -536,7 +543,8 @@ Canary 的目标是部署在 API Gateway REST API 后面的 `backend`。旧版�
 ## 14. MVP 验收标准
 
 - 前端可以提交订单号和问题，并看到流式回答。
-- Mastra 必须先从后端取得订单数据，再调用 `customer-ops` 模型。
+- Mastra 并行取得订单数据和知识资料，再调用 `customer-ops` 模型。
+- 三类家电问题能召回对应知识；RAG 故障时仍能继续流式回答。
 - 无订单、无权限或后端失败时，模型不编造事实。
 - FastAPI 模型服务不可用时前端收到明确错误和 `trace_id`。
 - 正常对话完成后能够产生 SNS 事件，并被两个 SQS 消费者接收。

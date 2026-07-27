@@ -8,6 +8,7 @@ use crate::application::get_order::GetOrder;
 use crate::application::list_orders::ListOrders;
 use crate::application::login::Login;
 use crate::application::products::Products;
+use crate::application::search_knowledge::SearchKnowledge;
 use crate::domain::auth::TokenVerifier;
 
 #[derive(Clone)]
@@ -19,26 +20,5 @@ pub struct AppState {
     pub(crate) login: Arc<Login>,
     pub(crate) verifier: Arc<dyn TokenVerifier>,
     pub(crate) products: Arc<Products>,
-}
-
-impl AppState {
-    pub fn new(
-        get_order: Arc<GetOrder>,
-        list_orders: Arc<ListOrders>,
-        create_order: Arc<CreateOrder>,
-        complete_conversation: Arc<CompleteConversation>,
-        login: Arc<Login>,
-        verifier: Arc<dyn TokenVerifier>,
-        products: Arc<Products>,
-    ) -> Self {
-        Self {
-            get_order,
-            list_orders,
-            create_order,
-            complete_conversation,
-            login,
-            verifier,
-            products,
-        }
-    }
+    pub(crate) search_knowledge: Arc<SearchKnowledge>,
 }

@@ -16,10 +16,9 @@ on:
       environment:
         description: GitHub Environment and Wrangler environment
         required: true
-        default: staging
+        default: production
         type: choice
         options:
-          - staging
           - production
 
 concurrency:

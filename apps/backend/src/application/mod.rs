@@ -7,3 +7,4 @@ pub mod get_order;
 pub mod list_orders;
 pub mod login;
 pub mod products;
+pub mod search_knowledge;

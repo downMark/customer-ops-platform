@@ -19,6 +19,14 @@ Parameters:
   ModelObjectKey:
     Type: String
     Default: models/customer-ops/customer-ops-q4_k_m.gguf
+  EmbeddingModelPrefix:
+    Type: String
+    Default: models/customer-ops/bge-m3-onnx/
+    AllowedPattern: "^models/customer-ops/[A-Za-z0-9._/-]+/$"
+  RerankModelPrefix:
+    Type: String
+    Default: models/customer-ops/bge-reranker-v2-m3-onnx/
+    AllowedPattern: "^models/customer-ops/[A-Za-z0-9._/-]+/$"
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
@@ -367,7 +375,18 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: s3:GetObject
-                Resource: !Sub arn:${AWS::Partition}:s3:::${ModelBucketName}/${ModelObjectKey}
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${ModelBucketName}/${ModelObjectKey}
+                  - !Sub arn:${AWS::Partition}:s3:::${ModelBucketName}/${EmbeddingModelPrefix}*
+                  - !Sub arn:${AWS::Partition}:s3:::${ModelBucketName}/${RerankModelPrefix}*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ModelBucketName}
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub ${EmbeddingModelPrefix}*
+                      - !Sub ${RerankModelPrefix}*
 
   ModelApiTaskRole:
     Type: AWS::IAM::Role

@@ -30,7 +30,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH \
     MODEL_HOST=0.0.0.0 \
     MODEL_PORT=8000 \
-    MODEL_PATH=/models/customer-ops-q4_k_m.gguf
+    MODEL_PATH=/models/customer-ops-q4_k_m.gguf \
+    EMBEDDING_MODEL_PATH=/models/bge-m3-onnx/model.onnx \
+    RERANK_MODEL_PATH=/models/bge-reranker-v2-m3-onnx/model.onnx
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \

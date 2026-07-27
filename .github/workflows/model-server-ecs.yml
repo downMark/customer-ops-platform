@@ -16,10 +16,9 @@ on:
       environment:
         description: GitHub Environment containing the AWS deployment configuration
         required: true
-        default: staging
+        default: production
         type: choice
         options:
-          - staging
           - production
 
 concurrency:
@@ -74,6 +73,9 @@ jobs:
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
       FOUNDATION_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-foundation
       RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
+      MODEL_BUCKET_NAME: ${{ vars.MODEL_BUCKET_NAME || 'customer-ops-models' }}
+      EMBEDDING_MODEL_PREFIX: ${{ vars.EMBEDDING_MODEL_PREFIX || 'models/customer-ops/bge-m3-onnx/' }}
+      RERANK_MODEL_PREFIX: ${{ vars.RERANK_MODEL_PREFIX || 'models/customer-ops/bge-reranker-v2-m3-onnx/' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -122,6 +124,40 @@ jobs:
             echo "task_family=${task_family}"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Verify retrieval artifacts and active task configuration
+        run: |
+          for prefix in "${EMBEDDING_MODEL_PREFIX}" "${RERANK_MODEL_PREFIX}"; do
+            for artifact in SHA256SUMS model.onnx model.onnx_data tokenizer.json; do
+              aws s3api head-object \
+                --bucket "${MODEL_BUCKET_NAME}" \
+                --key "${prefix}${artifact}" \
+                >/dev/null
+            done
+          done
+
+          aws ecs describe-task-definition \
+            --task-definition "${{ steps.resources.outputs.task_family }}" \
+            --query taskDefinition \
+            > "${RUNNER_TEMP}/model-server-task-definition.json"
+
+          embedding_uri="s3://${MODEL_BUCKET_NAME}/${EMBEDDING_MODEL_PREFIX}"
+          rerank_uri="s3://${MODEL_BUCKET_NAME}/${RERANK_MODEL_PREFIX}"
+          jq -e \
+            --arg embedding_uri "${embedding_uri}" \
+            --arg rerank_uri "${rerank_uri}" \
+            '
+              .containerDefinitions[]
+              | select(.name == "model-server")
+              | (.environment // []) as $environment
+              | any($environment[]; .name == "EMBEDDING_MODEL_S3_URI" and .value == $embedding_uri)
+                and any($environment[]; .name == "RERANK_MODEL_S3_URI" and .value == $rerank_uri)
+                and any($environment[]; .name == "EMBEDDING_MODEL_PATH" and .value == "/models/bge-m3-onnx/model.onnx")
+                and any($environment[]; .name == "RERANK_MODEL_PATH" and .value == "/models/bge-reranker-v2-m3-onnx/model.onnx")
+            ' "${RUNNER_TEMP}/model-server-task-definition.json" >/dev/null || {
+              echo "::error::Active task definition is missing the RAG model configuration. Run 'Infrastructure - Provision Platform' for this environment, then rerun this workflow."
+              exit 1
+            }
+
       - name: Sign in to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -139,13 +175,6 @@ jobs:
           tags: ${{ steps.ecr.outputs.registry }}/${{ steps.resources.outputs.ecr_repository }}:${{ github.sha }}
           cache-from: type=gha,scope=model-server
           cache-to: type=gha,mode=max,scope=model-server
-
-      - name: Download active task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition "${{ steps.resources.outputs.task_family }}" \
-            --query taskDefinition \
-            > "${RUNNER_TEMP}/model-server-task-definition.json"
 
       - name: Render image into task definition
         id: task
@@ -171,5 +200,6 @@ jobs:
             echo "- Cluster/service: \`${{ steps.resources.outputs.ecs_cluster }}/${{ steps.resources.outputs.ecs_service }}\`"
             echo "- Image: \`${{ steps.resources.outputs.ecr_repository }}:${GITHUB_SHA}\`"
             echo "- Exposure: private; ingress on port 8000 only from the Mastra task security group"
-            echo "- Model: downloaded at runtime from the task definition's \`MODEL_S3_URI\`"
+            echo "- Models: GGUF, BGE-M3 and BGE Reranker downloaded from S3 at startup"
+            echo "- Capacity: unchanged at 4 vCPU / 16 GiB"
           } >> "${GITHUB_STEP_SUMMARY}"

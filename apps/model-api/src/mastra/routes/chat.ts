@@ -5,6 +5,7 @@ import { chatRequestSchema } from "../../contracts/chat";
 import { AppError, toAppError } from "../../lib/errors";
 import { withTimeout } from "../../lib/signals";
 import { backendClient } from "../../services/backend-client";
+import { retrieveKnowledge } from "../../services/knowledge";
 import { buildCustomerPrompt } from "../../services/prompt";
 import { encodeSse, errorSseData, sseResponse } from "../../http/sse";
 
@@ -96,22 +97,33 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
         controller.enqueue(encodeSse({ event: "start", data: { traceId } }));
 
         try {
-          const order = request.orderId
-            ? await backendClient.getOrder({
-                orderId: request.orderId,
-                authorization,
-                traceId,
-                signal: c.req.raw.signal,
-              })
-            : undefined;
+          const [order, references] = await Promise.all([
+            request.orderId
+              ? backendClient.getOrder({
+                  orderId: request.orderId,
+                  authorization,
+                  traceId,
+                  signal: c.req.raw.signal,
+                })
+              : Promise.resolve(undefined),
+            retrieveKnowledge({
+              query: request.message,
+              authorization,
+              traceId,
+              signal: c.req.raw.signal,
+            }),
+          ]);
 
           const agent = c.get("mastra").getAgent("customerOpsAgent");
-          const result = await agent.stream(buildCustomerPrompt(request, order), {
-            abortSignal: withTimeout(
-              config.modelTimeoutMs,
-              c.req.raw.signal,
-            ),
-          });
+          const result = await agent.stream(
+            buildCustomerPrompt(request, order, references),
+            {
+              abortSignal: withTimeout(
+                config.modelTimeoutMs,
+                c.req.raw.signal,
+              ),
+            },
+          );
 
           for await (const text of result.textStream) {
             controller.enqueue(encodeSse({ event: "delta", data: { text } }));
