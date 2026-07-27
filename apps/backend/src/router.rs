@@ -64,6 +64,15 @@ fn build_base_router(state: AppState) -> Router {
             post(handler::conversations::complete_conversation),
         )
         .route("/api/knowledge/search", post(handler::knowledge::search))
+        .route("/api/ops/aws-status", get(handler::operations::status))
+        .route(
+            "/api/ops/failure-tests",
+            post(handler::operations::trigger_failure_test),
+        )
+        .route(
+            "/api/ops/failure-tests/{test_id}/recover",
+            post(handler::operations::recover_failure_test),
+        )
         .route("/api/health", get(handler::health::health))
         .layer(axum::middleware::from_fn(handler::middleware::trace_id))
         .layer(TraceLayer::new_for_http())
@@ -103,6 +112,10 @@ mod tests {
     };
     use crate::domain::event::{ConversationCompleted, EventPublisher, PublishError};
     use crate::domain::knowledge::{KnowledgeChunk, KnowledgeFilter, KnowledgeRepository};
+    use crate::domain::operations::{
+        AwsStatus, FailureTestAccepted, Operations, OperationsError, QueueMetrics, QueueStatus,
+        RecoveryAccepted, TopicStatus,
+    };
     use crate::domain::order::{NewOrder, Order, OrderFilter, OrderItem};
     use crate::domain::product::Product;
     use crate::domain::repository::{OrderRepository, ProductRepository, RepoError};
@@ -199,6 +212,55 @@ mod tests {
     impl EventPublisher for FakePublisher {
         async fn publish(&self, _event: &ConversationCompleted) -> Result<(), PublishError> {
             Ok(())
+        }
+    }
+
+    struct FakeOperations;
+
+    #[async_trait]
+    impl Operations for FakeOperations {
+        async fn status(&self) -> Result<AwsStatus, OperationsError> {
+            Ok(AwsStatus {
+                topic: TopicStatus {
+                    name: "customer-ops-production-domain-events".into(),
+                    exists: true,
+                    confirmed_subscriptions: 2,
+                },
+                queues: vec![QueueStatus {
+                    key: "quality".into(),
+                    name: "customer-ops-production-quality".into(),
+                    dead_letter_queue: false,
+                    max_receive_count: Some(5),
+                    metrics: QueueMetrics {
+                        visible: 0,
+                        in_flight: 0,
+                        delayed: 0,
+                        oldest_message_age_seconds: None,
+                    },
+                }],
+                alarms: vec![],
+                failure_test: None,
+                refreshed_at: "2026-07-27T12:00:00Z".into(),
+            })
+        }
+
+        async fn trigger_failure_test(&self) -> Result<FailureTestAccepted, OperationsError> {
+            Ok(FailureTestAccepted {
+                test_id: "test-drill-1".into(),
+                status: "active".into(),
+            })
+        }
+
+        async fn recover_failure_test(
+            &self,
+            test_id: &str,
+        ) -> Result<RecoveryAccepted, OperationsError> {
+            Ok(RecoveryAccepted {
+                test_id: test_id.into(),
+                status: "recovered".into(),
+                quality_redrive_task: Some("quality-task".into()),
+                analytics_redrive_task: Some("analytics-task".into()),
+            })
         }
     }
 
@@ -333,6 +395,7 @@ mod tests {
             verifier: Arc::new(FakeVerifier),
             products: Arc::new(Products::new(Arc::new(FakeProductRepository))),
             search_knowledge: Arc::new(SearchKnowledge::new(Arc::new(FakeKnowledgeRepository))),
+            operations: Arc::new(FakeOperations),
         })
     }
 
@@ -392,6 +455,58 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["data"]["items"][0]["documentId"], "refrigerator-guide");
         assert_eq!(body["data"]["items"][0]["score"], 0.91);
+    }
+
+    #[tokio::test]
+    async fn operations_status_is_authenticated_and_sanitized() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ops/aws-status")
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["data"]["topic"]["confirmedSubscriptions"], 2);
+        assert_eq!(body["data"]["queues"][0]["maxReceiveCount"], 5);
+        assert!(body.to_string().find("arn:aws").is_none());
+    }
+
+    #[tokio::test]
+    async fn failure_drill_requires_admin_and_exact_confirmation() {
+        let request = |token: &str, confirmation: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ops/failure-tests")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"confirmation": confirmation}).to_string(),
+                ))
+                .unwrap()
+        };
+        let forbidden = test_router()
+            .oneshot(request("valid-token", "TRIGGER_DLQ_TEST"))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let invalid = test_router()
+            .oneshot(request("admin-token", "TRIGGER"))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let accepted = test_router()
+            .oneshot(request("admin-token", "TRIGGER_DLQ_TEST"))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(accepted).await["data"]["testId"], "test-drill-1");
     }
 
     #[tokio::test]

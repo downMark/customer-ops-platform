@@ -10,9 +10,12 @@ only publish code or images after the two platform stacks exist.
   - ECR repositories and Lambda artifact bucket
   - ECS cluster for CPU Fargate services
   - task roles, log groups, Secrets Manager secrets
-  - SNS topic, quality/analytics queues and their DLQs
+  - domain/operations SNS topics, quality/analytics queues and their DLQs
+  - DynamoDB failure-drill state
 - `customer-ops-<environment>-runtime`
   - backend Lambda, version aliases, API Gateway REST API and canary stage
+  - Event Worker Lambda and SQS event source mappings
+  - API health Synthetics Canary, alarms and operations Dashboard
   - private model-server NLB and CPU Fargate service
   - public model-api ALB and Fargate ECS service
 
@@ -50,33 +53,25 @@ Variables:
   `models/customer-ops/bge-reranker-v2-m3-onnx/`.
 - `FRONTEND_ORIGIN`: optional. It is not needed for the first deployment. Set
   it later to the Worker/custom-domain origin to tighten direct backend CORS.
-- `BACKEND_CANARY_PERCENT`: optional initial release percentage expressed as a
-  fraction; defaults to `0.10` (10%).
+## Infrastructure updates
 
-## First deployment
+Run **Infrastructure - Update Production** and enter `UPDATE`. This workflow is
+update-only: it requires both stacks to exist, preserves the current Backend
+code key and ECS image URIs, builds the Event Worker, and updates CloudFormation.
+It does not deploy the frontend or roll ECS services.
 
-Run **Infrastructure - Provision Platform**, select the GitHub Environment, and
-enter `PROVISION`. The workflow:
-
-1. validates both CloudFormation templates and all GGUF/BGE S3 model artifacts;
-2. creates/updates the foundation stack;
-3. builds and uploads the Lambda package and both ECS images;
-4. creates/updates the runtime stack;
-5. builds and creates/updates the Cloudflare Worker.
-
-There is no frontend address before the first Worker deployment. After Wrangler
-deploys it, the workflow summary shows `Frontend URL` from Wrangler's
-`deployment-url` output. The Worker proxies both `/backend-api/*` and
-`/model-api/*`, so the browser uses same-origin URLs and the first deployment
-does not depend on `FRONTEND_ORIGIN`.
+The GitHub deployment role needs the existing CloudFormation/S3/IAM deployment
+permissions plus Lambda Event Worker updates, API Gateway stage reads/writes,
+Lambda alias reads/writes, `cloudwatch:DescribeAlarms`, and
+`synthetics:GetCanaryRuns`.
 
 ## RAG rollout order
 
 When introducing or changing the BGE models, deploy production in this order:
 
 1. Commit and push the code.
-2. Run **Infrastructure - Provision Platform** for `production` with confirmation
-   `PROVISION`. This updates the task role and task-definition
+2. Run **Infrastructure - Update Production** for `production` with confirmation
+   `UPDATE`. This updates the task role and task-definition
    model paths while keeping model-server at 4 vCPU / 16 GiB.
 3. Rerun **Python Model Server - Amazon ECS** if its push-triggered run was
    blocked before the infrastructure update completed.
@@ -91,11 +86,11 @@ without starting an unsafe ECS rollout.
 
 API Gateway's normal stage variable targets Lambda alias `stable`. Its canary
 override targets alias `canary`. A backend deployment publishes an immutable
-Lambda version and sends the configured percentage to `canary`.
+Lambda version and updates `canary`, while keeping traffic at 0%.
 
-The workflow starts at 10% (or `BACKEND_CANARY_PERCENT`) and makes no further
-traffic changes. CloudWatch alarms remain available for operators, but they do
-not automatically promote or roll back the release.
+Use **Backend - Canary Control** to inspect, set 0%/10%/25%/50%/100%, promote,
+or roll back. Traffic increases are blocked unless alarms are OK and the latest
+Synthetics run passed. Alarms never change traffic automatically.
 
 To change the percentage in the AWS console:
 
@@ -114,3 +109,12 @@ At 100%, finish the promotion so the next release has a clean baseline:
 
 Do not change the canary stage-variable override: it must remain
 `lambdaAlias=canary`.
+
+## Synthetics and DLQ operations
+
+- CloudWatch → Synthetics Canaries → `cops-production-api` shows five-minute
+  health runs and failure artifacts.
+- CloudWatch → Dashboards → `customer-ops-production-operations` combines API,
+  Lambda, SNS, SQS/DLQ, Canary and ECS metrics.
+- The authenticated frontend `/operations` page shows sanitized live queue
+  state. Only admins can trigger a controlled poison event or recover/redrive it.

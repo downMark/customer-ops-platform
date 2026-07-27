@@ -14,6 +14,12 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     /// SNS Topic ARN；缺省则用 no-op 发布器（本地无 AWS）。
     pub sns_topic_arn: Option<String>,
+    pub operations_table_name: Option<String>,
+    pub quality_queue_url: Option<String>,
+    pub analytics_queue_url: Option<String>,
+    pub quality_dlq_url: Option<String>,
+    pub analytics_dlq_url: Option<String>,
+    pub operations_alarm_names: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +62,14 @@ impl Config {
         let sns_topic_arn = env::var("SNS_TOPIC_ARN")
             .ok()
             .filter(|v| !v.trim().is_empty());
+        let optional = |key| env::var(key).ok().filter(|value| !value.trim().is_empty());
+        let operations_alarm_names = env::var("OPERATIONS_ALARM_NAMES")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
         let cors_origins = env::var("CORS_ORIGINS")
             .unwrap_or_else(|_| "http://localhost:3002".into())
             .split(',')
@@ -72,6 +86,12 @@ impl Config {
             db_connect_timeout_secs,
             cors_origins,
             sns_topic_arn,
+            operations_table_name: optional("OPERATIONS_TABLE_NAME"),
+            quality_queue_url: optional("QUALITY_QUEUE_URL"),
+            analytics_queue_url: optional("ANALYTICS_QUEUE_URL"),
+            quality_dlq_url: optional("QUALITY_DLQ_URL"),
+            analytics_dlq_url: optional("ANALYTICS_DLQ_URL"),
+            operations_alarm_names,
         })
     }
 }

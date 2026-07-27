@@ -54,6 +54,9 @@ pub enum AppError {
     InsufficientStock,
     ProductConflict,
     AdminRequired,
+    OperationsConflict,
+    OperationsNotFound,
+    OperationsUnavailable,
     /// 数据库/上游不可用或超时（不猜测订单状态）。
     ServiceUnavailable,
     /// 未预期的内部错误；detail 只进日志，不返回客户端。
@@ -72,6 +75,17 @@ impl AppError {
             AppError::InsufficientStock => (StatusCode::CONFLICT, 40902, "商品库存不足"),
             AppError::ProductConflict => (StatusCode::CONFLICT, 40903, "商品编号已存在"),
             AppError::AdminRequired => (StatusCode::FORBIDDEN, 40302, "仅管理员可执行该操作"),
+            AppError::OperationsConflict => (
+                StatusCode::CONFLICT,
+                40904,
+                "已有演练正在进行或死信队列尚未清空",
+            ),
+            AppError::OperationsNotFound => (StatusCode::NOT_FOUND, 40402, "异常演练不存在"),
+            AppError::OperationsUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                50302,
+                "AWS 运行状态暂时不可用",
+            ),
             AppError::ServiceUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, 50301, "订单服务暂时不可用")
             }

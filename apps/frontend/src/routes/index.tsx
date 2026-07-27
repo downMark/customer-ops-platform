@@ -7,6 +7,7 @@ const Orders = lazy(() => import("pages/Orders"));
 const CreateOrder = lazy(() => import("pages/CreateOrder"));
 const Products = lazy(() => import("pages/Products"));
 const CreateProduct = lazy(() => import("pages/CreateProduct"));
+const Operations = lazy(() => import("pages/Operations"));
 
 const chatRoute = {
   element: <ActiveChat />,
@@ -23,6 +24,7 @@ const routes: PreFetchRouteObject[] = [
       { path: "addOrder", element: <CreateOrder /> },
       { path: "products", element: <Products /> },
       { path: "products/new", element: <CreateProduct /> },
+      { path: "operations", element: <Operations /> },
     ],
   },
 ];

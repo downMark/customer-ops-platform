@@ -5,5 +5,6 @@ pub mod conversations;
 pub mod health;
 pub mod knowledge;
 pub mod middleware;
+pub mod operations;
 pub mod orders;
 pub mod products;

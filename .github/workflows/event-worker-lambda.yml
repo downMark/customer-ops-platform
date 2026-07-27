@@ -1,0 +1,86 @@
+name: Event Worker - AWS Lambda
+
+on:
+  pull_request:
+    paths:
+      - "apps/event-worker/**"
+      - ".github/workflows/event-worker-lambda.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/event-worker/**"
+      - ".github/workflows/event-worker-lambda.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        default: production
+        type: choice
+        options: [production]
+
+concurrency:
+  group: event-worker-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/event-worker
+    steps:
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: 1.94.1
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  deploy:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
+      RUNTIME_STACK: customer-ops-production-runtime
+    steps:
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: 1.94.1
+          bins: cargo-lambda
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+      - name: Build
+        working-directory: apps/event-worker
+        run: cargo lambda build --release --output-format zip --bin event-worker
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Update production worker
+        working-directory: apps/event-worker
+        run: |
+          function_name="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='EventWorkerFunctionName'].OutputValue" \
+              --output text
+          )"
+          test -n "${function_name}"
+          aws lambda update-function-code \
+            --function-name "${function_name}" \
+            --zip-file fileb://target/lambda/event-worker/bootstrap.zip >/dev/null
+          aws lambda wait function-updated-v2 --function-name "${function_name}"
+          echo "### Event worker deployed: \`${function_name}\`" >> "${GITHUB_STEP_SUMMARY}"

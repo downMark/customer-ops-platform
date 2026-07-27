@@ -3,6 +3,10 @@ import type { AppError } from "../lib/errors";
 
 const encoder = new TextEncoder();
 
+export function encodeSseComment(comment = "keep-alive"): Uint8Array {
+  return encoder.encode(`: ${comment}\n\n`);
+}
+
 export type SseEvent =
   | { event: "start"; data: { traceId: string } }
   | { event: "delta"; data: { text: string } }

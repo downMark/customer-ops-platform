@@ -13,6 +13,7 @@ use crate::application::products::Products;
 use crate::application::search_knowledge::SearchKnowledge;
 use crate::config::Config;
 use crate::domain::event::EventPublisher;
+use crate::domain::operations::{Operations, UnavailableOperations};
 use crate::infra::conversation_repo::SeaOrmConversationRepository;
 use crate::infra::db;
 use crate::infra::jwt::JwtVerifier;
@@ -39,6 +40,7 @@ pub(crate) async fn build_state(config: &Config) -> Result<AppState, StartupErro
         &config.jwt_secret,
         config.jwt_ttl_seconds,
     ));
+    let operations = build_operations(config).await;
 
     Ok(AppState {
         get_order: Arc::new(GetOrder::new(order_repo.clone())),
@@ -56,7 +58,17 @@ pub(crate) async fn build_state(config: &Config) -> Result<AppState, StartupErro
         verifier: jwt,
         products: Arc::new(Products::new(product_repo)),
         search_knowledge: Arc::new(SearchKnowledge::new(knowledge_repo)),
+        operations,
     })
+}
+
+async fn build_operations(config: &Config) -> Arc<dyn Operations> {
+    #[cfg(feature = "ops")]
+    if let Some(operations) = crate::infra::operations::AwsOperations::from_env(config).await {
+        return Arc::new(operations);
+    }
+    tracing::warn!("AWS operations integration is not configured");
+    Arc::new(UnavailableOperations)
 }
 
 /// 有 `SNS_TOPIC_ARN` 且启用 `sns` feature 时使用真实 SNS，否则回退 no-op。

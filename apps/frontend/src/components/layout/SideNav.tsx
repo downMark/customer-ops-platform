@@ -7,6 +7,7 @@ const items = [
   { to: "/orders", icon: "receipt_long", label: "订单数据" },
   { to: "/addOrder", icon: "add_box", label: "添加订单" },
   { to: "/products", icon: "database", label: "商品管理" },
+  { to: "/operations", icon: "monitor_heart", label: "运行状态" },
 ];
 
 const displayRole = (role: string) =>

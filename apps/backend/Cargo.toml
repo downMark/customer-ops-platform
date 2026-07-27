@@ -36,10 +36,22 @@ aws-config = { version = "1", features = [
     "behavior-version-latest",
 ], optional = true }
 aws-sdk-sns = { version = "1", optional = true }
+aws-sdk-sqs = { version = "1", optional = true }
+aws-sdk-dynamodb = { version = "1", optional = true }
+aws-sdk-cloudwatch = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
 
 [features]
 default = []
 sns = ["dep:aws-config", "dep:aws-sdk-sns"]
+ops = [
+    "dep:aws-config",
+    "dep:aws-sdk-sns",
+    "dep:aws-sdk-sqs",
+    "dep:aws-sdk-dynamodb",
+    "dep:aws-sdk-cloudwatch",
+    "dep:aws-smithy-types",
+]
 lambda = ["dep:lambda_http"]
 
 [[bin]]

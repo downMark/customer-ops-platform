@@ -50,10 +50,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --features lambda,sns -- -D warnings
+        run: cargo clippy --all-targets --features lambda,sns,ops -- -D warnings
 
       - name: Test
-        run: cargo test --features lambda
+        run: cargo test --features lambda,ops
 
   deploy:
     name: Deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
@@ -69,7 +69,6 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
       RUNTIME_STACK: customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-runtime
-      CANARY_PERCENT: ${{ vars.BACKEND_CANARY_PERCENT || '0.10' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -91,7 +90,7 @@ jobs:
           : "${AWS_DEPLOY_ROLE_ARN:?Configure AWS_DEPLOY_ROLE_ARN in the GitHub Environment}"
 
       - name: Build Lambda package
-        run: cargo lambda build --release --output-format zip --bin lambda --features lambda,sns
+        run: cargo lambda build --release --output-format zip --bin lambda --features lambda,sns,ops
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -143,20 +142,16 @@ jobs:
             --function-name "${BACKEND_LAMBDA_FUNCTION_NAME}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Start canary for manual rollout
+      - name: Prepare candidate with zero traffic
         env:
           CANDIDATE_VERSION: ${{ steps.publish.outputs.version }}
         run: |
-          reset_canary() {
-            aws apigateway update-stage \
-              --rest-api-id "${BACKEND_REST_API_ID}" \
-              --stage-name "${BACKEND_API_STAGE}" \
-              --patch-operations \
-                op=replace,path=/canarySettings/percentTraffic,value=0 \
-              >/dev/null
-          }
-
-          reset_canary
+          aws apigateway update-stage \
+            --rest-api-id "${BACKEND_REST_API_ID}" \
+            --stage-name "${BACKEND_API_STAGE}" \
+            --patch-operations \
+              op=replace,path=/canarySettings/percentTraffic,value=0 \
+            >/dev/null
           aws lambda update-alias \
             --function-name "${BACKEND_LAMBDA_FUNCTION_NAME}" \
             --name canary \
@@ -166,7 +161,6 @@ jobs:
             --rest-api-id "${BACKEND_REST_API_ID}" \
             --stage-name "${BACKEND_API_STAGE}" \
             --patch-operations \
-              op=replace,path=/canarySettings/percentTraffic,value="${CANARY_PERCENT}" \
               op=replace,path=/canarySettings/stageVariableOverrides/lambdaAlias,value=canary \
             >/dev/null
 
@@ -178,8 +172,7 @@ jobs:
             echo "- Environment: \`${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}\`"
             echo "- Function: \`${BACKEND_LAMBDA_FUNCTION_NAME}\`"
             echo "- Published version: \`${{ steps.publish.outputs.version }}\`"
-            echo "- Canary: started at \`${CANARY_PERCENT}\`; no automatic traffic changes will follow"
-            echo "- Manual rollout: API Gateway > REST APIs > \`customer-ops-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}-backend\` > Stages > \`${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}\` > Canary"
-            echo "- Roll back by setting canary traffic to \`0%\`; increase it manually when ready"
+            echo "- Canary alias updated; traffic remains at \`0%\`"
+            echo "- Use the \`Backend - Canary Control\` workflow or API Gateway console to increase traffic"
             echo "- Region: \`${AWS_REGION}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

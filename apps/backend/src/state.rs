@@ -10,6 +10,7 @@ use crate::application::login::Login;
 use crate::application::products::Products;
 use crate::application::search_knowledge::SearchKnowledge;
 use crate::domain::auth::TokenVerifier;
+use crate::domain::operations::Operations;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,4 +22,5 @@ pub struct AppState {
     pub(crate) verifier: Arc<dyn TokenVerifier>,
     pub(crate) products: Arc<Products>,
     pub(crate) search_knowledge: Arc<SearchKnowledge>,
+    pub(crate) operations: Arc<dyn Operations>,
 }

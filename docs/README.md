@@ -27,7 +27,7 @@
 - 保存必要的对话完成记录。
 - 对话完成事件通过 SNS 分发到 SQS。
 - SQS 消费失败后进入 DLQ，并支持 redrive。
-- CloudWatch Synthetics 健康检查和完整聊天链路巡检。
+- CloudWatch Synthetics 后端 API 健康巡检。
 - API Gateway Canary 灰度发布、指标观察和回滚。
 - 使用基础设施代码创建 AWS 资源。
 
@@ -270,12 +270,17 @@ POST http://127.0.0.1:8000/v1/rerank
 
 ### 8.1 发布流水线
 
-仓库提供四条互相独立的 GitHub Actions：
+仓库提供独立的应用、基础设施和灰度控制 GitHub Actions：
 
 - `.github/workflows/frontend-cloudflare.yml`：检查 TypeScript、ESLint 和
   Worker bundle，然后使用 Wrangler 发布 Cloudflare Worker。
 - `.github/workflows/backend-lambda.yml`：检查格式、Clippy 和测试，使用
-  Cargo Lambda 构建 ZIP，然后通过 AWS OIDC 更新现有 Lambda 函数并发布新版本。
+  Cargo Lambda 构建 ZIP，发布 candidate 并更新 `canary` alias，但保持流量为 0%。
+- `.github/workflows/backend-canary-control.yml`：查看灰度状态，手动设置
+  0%/10%/25%/50%/100%，晋级或回滚。增加流量前检查告警和最近一次巡检。
+- `.github/workflows/event-worker-lambda.yml`：独立测试和发布 SQS Event Worker。
+- `.github/workflows/infrastructure.yml`：只更新 production CloudFormation、
+  Dashboard、Synthetics 和 Event Worker 初始制品；复用现有 Backend/ECS 制品。
 - `.github/workflows/model-api-ecs.yml`：测试并构建 Mastra 容器，推送 ECR，
   将不可变 commit SHA 镜像写入现有 ECS Task Definition 后滚动部署。
 - `.github/workflows/model-server-ecs.yml`：测试并构建 CPU 推理容器，推送
@@ -376,46 +381,43 @@ Mastra ECS          ──TCP 8000──> private Python model-server
   `arn:aws:s3:::customer-ops-models/models/customer-ops/customer-ops-q4_k_m.gguf`。
 - Backend Lambda 不直接调用 Python model-server。
 
-### 8.4 首次部署前提
+### 8.4 基础设施更新
 
-首次部署由 `Infrastructure - Provision Platform` 工作流统一编排：
+当前项目仅维护 `production`。持续基础设施更新由
+`Infrastructure - Update Production` 工作流执行：
 
-1. 先创建 Cloudflare API Token，并在两个 GitHub Environment 中配置变量。
-2. 用 CloudFormation 创建 x86_64 Lambda、执行角色、API Gateway 和 SNS。
-3. 创建 ECR Repositories、Mastra Fargate Service、CPU model-server Fargate
-   Service、私有 NLB 和上述 Security Groups。
-4. Python Task Definition 配置 `MODEL_S3_URI`、模型 Task Role 和
-   `MODEL_SERVER_API_KEY`；Mastra Task Definition 配置私有
-   `MODEL_SERVER_BASE_URL`、同一 API Key、Backend URL 与前端 CORS。
-5. 在 AWS 创建 GitHub OIDC Provider 与部署角色，并限制仓库/Environment。
-6. 手动运行 production workflow，并通过 Environment reviewer 审批控制发布。
+1. 输入 `UPDATE` 并通过 production Environment reviewer。
+2. 工作流确认 foundation/runtime Stack 已存在。
+3. 读取并复用当前 Backend ZIP key、Model API 镜像和 Model Server 镜像。
+4. 更新 CloudFormation，并上传 Event Worker 制品。
+5. 不发布 Frontend，不滚动 ECS，也不把 Backend candidate 提升为 stable。
 
 Backend workflow 的 `update-function-code` 不修改函数环境变量、内存、超时、
-VPC 或 API Gateway Canary 配置。Canary 流量调整由基础设施发布流程单独执行，
-避免一次普通代码提交直接把灰度流量提升到 100%。
+VPC 或 API Gateway Canary 配置。Canary 流量只由专用 Canary Control 工作流
+或 AWS 控制台调整，避免普通代码提交直接获得生产流量。
 
 ## 9. CloudWatch Synthetics 巡检
 
 ### 9.1 健康巡检
 
-创建 `cop-api-health` Canary：
+CloudFormation 创建 `cops-production-api` Canary：
 
 - 每 5 分钟执行。
-- 调用公开的 `/api/health`。
-- 断言 HTTP 200、`status = ok` 和响应时间阈值。
+- 调用生产 Backend 的公开 `/api/health`。
+- 断言 HTTP 200、统一响应 `success=true` 且 `data.status=ok`。
 - 连续两次失败触发 CloudWatch Alarm。
-- 告警发送到运维 SNS Topic。
+- 告警发送到暂未配置邮件订阅的 Operations SNS Topic。
 
-### 9.2 完整聊天巡检
+当前第一版不执行登录、订单或完整 RAG 聊天巡检。
 
-创建 `cop-chat-journey` Canary：
+### 9.2 AWS 控制台查看巡检
 
-- 每 15 分钟执行。
-- 使用专用测试身份和固定测试订单。
-- 调用 `/api/chat/stream`。
-- 断言收到 `traceId`、至少一个 `delta` 和最终 `done`。
-- 验证回答包含测试订单的预期状态，但不要求逐字匹配。
-- 不记录 Authorization、完整响应正文或真实客户数据。
+1. 打开 AWS Console → **CloudWatch**。
+2. 左侧进入 **Application monitoring → Synthetics Canaries**。
+3. 打开 `cops-production-api`。
+4. 在 **Runs** 查看每次执行的状态、耗时、步骤和失败产物。
+5. 在 **Dashboards** 打开 `customer-ops-production-operations`，查看巡检、
+   API、Lambda、SNS、SQS、DLQ 和 ECS 的汇总指标。
 
 ### 9.3 验收证据
 
@@ -464,24 +466,27 @@ cop-domain-events SNS
 ### 10.3 验收演示
 
 1. 发布正常事件并验证两个消费者成功处理。
-2. 发布带 `testPoison = true` 的测试事件。
+2. 管理员在前端“运行状态”页面输入 `TRIGGER`，发布专用
+   `operations.failure_test` 事件。
 3. 验证消息重试 5 次后进入对应 DLQ。
-4. 关闭测试失败条件。
-5. 将消息从 DLQ redrive 回主队列。
+4. 点击“解除异常并 Redrive”，将演练状态原子更新为 recovered。
+5. Backend 分别启动两个 DLQ 的 message move task。
 6. 验证业务副作用只执行一次，并能通过 `traceId` 串联日志。
 
 ## 11. API Gateway Canary 灰度发布
 
-Canary 的目标是部署在 API Gateway REST API 后面的 `backend`。旧版和新版通过同一个 `prod` Stage 对外服务。
+Canary 的目标是 API Gateway REST API 后面的 `backend`。旧版和新版通过同一个
+`production` Stage 对外服务。流量变更均为手动操作，告警不会自动回滚。
 
 推荐发布过程：
 
 ```text
-部署新版到 Canary
-  → 5% 流量，观察 10 分钟
-  → 20% 流量，观察 20 分钟
+发布新版并更新 Canary alias，保持 0%
+  → 10% 流量，观察
+  → 25% 流量，观察
   → 50% 流量，观察 20 分钟
-  → 100% 并提升为正式版本
+  → 100% 观察
+  → stable alias 指向 candidate，并将 Canary 归零
 ```
 
 低流量环境由 Synthetics 和受控测试请求补充样本。每个阶段检查：
@@ -489,13 +494,37 @@ Canary 的目标是部署在 API Gateway REST API 后面的 `backend`。旧版�
 - API Gateway 5xx。
 - Lambda Error 和 Throttle。
 - P95 响应时间。
-- 健康与完整聊天 Synthetics 成功率。
+- API 健康 Synthetics 成功率。
 - Mastra 调用后端的失败率。
 - DLQ 是否出现新增消息。
 
-任一关键告警触发时，将 Canary 流量恢复为 0%，保留失败版本及日志用于诊断。数据库和接口变更必须向后兼容，保证灰度期间新旧版本能够同时运行。
+任一关键告警触发时，人工将 Canary 流量恢复为 0%，保留失败版本及日志用于诊断。
+数据库和接口变更必须向后兼容，保证灰度期间新旧版本能够同时运行。
 
-验收需要保存 5%、20% 和 100% 阶段的配置与指标，并演示一次模拟故障回滚。
+### 11.1 在 AWS 控制台更新灰度比例
+
+1. AWS Console → **API Gateway → REST APIs**。
+2. 打开 `customer-ops-production-backend`。
+3. 进入 **Stages → production → Canary**。
+4. 确认普通 Stage Variable 为 `lambdaAlias=stable`，Canary Override 为
+   `lambdaAlias=canary`。
+5. 按 10% → 25% → 50% → 100% 调整，并观察
+   `customer-ops-production-operations` Dashboard。
+6. 回滚时把 Canary 比例设为 0%。
+7. 正式晋级时，在 **Lambda → customer-ops-production-backend → Aliases**
+   将 `stable` 指向 `canary` 当前版本，再把 Canary 比例设为 0%。
+
+优先使用 `Backend - Canary Control` Action，因为它会阻止在告警异常或最近一次
+Synthetics 未通过时增加流量，并在 Job Summary 中记录版本和比例。
+
+### 11.2 在 AWS 控制台查看和处理 DLQ
+
+1. AWS Console → **SQS → Queues**。
+2. 打开 `customer-ops-production-quality-dlq` 或
+   `customer-ops-production-analytics-dlq`。
+3. 在 **Monitoring** 查看可见消息和最老消息年龄。
+4. 前端恢复不可用时，可在 DLQ 页面选择 **Start DLQ redrive**，目标选择对应主队列。
+5. redrive 前必须先将演练状态解除，否则消息会再次失败进入 DLQ。
 
 ## 12. 安全与可观测性
 
@@ -531,14 +560,13 @@ Canary 的目标是部署在 API Gateway REST API 后面的 `backend`。旧版�
 1. 使用 CloudFormation 部署 backend Lambda 和 API Gateway REST API。
 2. 配置 Stage Canary、日志、指标和自动/手动回滚脚本。
 3. 部署可被 `model-api` 访问的后端环境。
-4. 完成 5%、20%、50%、100% 灰度验证。
+4. 完成 10%、25%、50%、100% 灰度验证。
 
 ### 阶段四：巡检和验收
 
 1. 创建健康检查 Canary。
-2. 创建完整聊天链路 Canary。
-3. 配置 CloudWatch Alarm 和运维 SNS 通知。
-4. 收集成功、失败、告警、DLQ、redrive、灰度和回滚证据。
+2. 配置 CloudWatch Dashboard、Alarm 和运维 SNS 通知。
+3. 收集成功、失败、告警、DLQ、redrive、灰度和回滚证据。
 
 ## 14. MVP 验收标准
 
@@ -549,6 +577,6 @@ Canary 的目标是部署在 API Gateway REST API 后面的 `backend`。旧版�
 - FastAPI 模型服务不可用时前端收到明确错误和 `trace_id`。
 - 正常对话完成后能够产生 SNS 事件，并被两个 SQS 消费者接收。
 - poison message 重试后进入 DLQ，修复后能够 redrive 且无重复副作用。
-- API Gateway 能完成 5% 到 100% 的 Canary 发布，并能在异常时回滚到 0%。
-- CloudWatch Synthetics 能持续验证健康接口和完整聊天链路。
+- API Gateway 能完成 10% 到 100% 的 Canary 发布，并能在异常时回滚到 0%。
+- CloudWatch Synthetics 能持续验证生产 Backend 健康接口。
 - 所有 AWS 资源均由 CloudFormation 重复创建，不依赖控制台手工配置。

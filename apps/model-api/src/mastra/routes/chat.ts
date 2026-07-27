@@ -7,7 +7,12 @@ import { withTimeout } from "../../lib/signals";
 import { backendClient } from "../../services/backend-client";
 import { retrieveKnowledge } from "../../services/knowledge";
 import { buildCustomerPrompt } from "../../services/prompt";
-import { encodeSse, errorSseData, sseResponse } from "../../http/sse";
+import {
+  encodeSse,
+  encodeSseComment,
+  errorSseData,
+  sseResponse,
+} from "../../http/sse";
 
 function getBearerToken(authorization: string | undefined): string {
   if (!authorization?.match(/^Bearer\s+\S+$/i)) {
@@ -95,6 +100,15 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         controller.enqueue(encodeSse({ event: "start", data: { traceId } }));
+        // BGE and a CPU-only LLM can have a long time-to-first-token. Keep the
+        // public ALB/Cloudflare/browser stream active while no model delta exists.
+        const heartbeat = setInterval(() => {
+          try {
+            controller.enqueue(encodeSseComment());
+          } catch {
+            clearInterval(heartbeat);
+          }
+        }, 15_000);
 
         try {
           const [order, references] = await Promise.all([
@@ -154,6 +168,7 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
             }),
           );
         } finally {
+          clearInterval(heartbeat);
           controller.close();
         }
       },

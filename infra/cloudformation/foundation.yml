@@ -248,23 +248,51 @@ Resources:
     Properties:
       TopicName: !Sub customer-ops-${Environment}-domain-events
 
+  OperationsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub customer-ops-${Environment}-operations-alerts
+
+  FailureDrillTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub customer-ops-${Environment}-failure-drills
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: test_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: test_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
   QualityDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub customer-ops-${Environment}-quality-dlq
       MessageRetentionPeriod: 1209600
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:customer-ops-${Environment}-quality
 
   AnalyticsDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub customer-ops-${Environment}-analytics-dlq
       MessageRetentionPeriod: 1209600
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:customer-ops-${Environment}-analytics
 
   QualityQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub customer-ops-${Environment}-quality
-      VisibilityTimeout: 180
+      VisibilityTimeout: 30
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt QualityDeadLetterQueue.Arn
         maxReceiveCount: 5
@@ -273,7 +301,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub customer-ops-${Environment}-analytics
-      VisibilityTimeout: 180
+      VisibilityTimeout: 30
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt AnalyticsDeadLetterQueue.Arn
         maxReceiveCount: 5
@@ -481,6 +509,50 @@ Outputs:
     Value: !Ref DomainEventsTopic
     Export:
       Name: !Sub customer-ops-${Environment}-domain-events-topic
+  OperationsAlertsTopicArn:
+    Value: !Ref OperationsAlertsTopic
+    Export:
+      Name: !Sub customer-ops-${Environment}-operations-alerts-topic
+  FailureDrillTableName:
+    Value: !Ref FailureDrillTable
+    Export:
+      Name: !Sub customer-ops-${Environment}-failure-drills-table
+  FailureDrillTableArn:
+    Value: !GetAtt FailureDrillTable.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-failure-drills-table-arn
+  QualityQueueUrl:
+    Value: !Ref QualityQueue
+    Export:
+      Name: !Sub customer-ops-${Environment}-quality-queue-url
+  QualityQueueArn:
+    Value: !GetAtt QualityQueue.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-quality-queue-arn
+  AnalyticsQueueUrl:
+    Value: !Ref AnalyticsQueue
+    Export:
+      Name: !Sub customer-ops-${Environment}-analytics-queue-url
+  AnalyticsQueueArn:
+    Value: !GetAtt AnalyticsQueue.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-analytics-queue-arn
+  QualityDlqUrl:
+    Value: !Ref QualityDeadLetterQueue
+    Export:
+      Name: !Sub customer-ops-${Environment}-quality-dlq-url
+  QualityDlqArn:
+    Value: !GetAtt QualityDeadLetterQueue.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-quality-dlq-arn
+  AnalyticsDlqUrl:
+    Value: !Ref AnalyticsDeadLetterQueue
+    Export:
+      Name: !Sub customer-ops-${Environment}-analytics-dlq-url
+  AnalyticsDlqArn:
+    Value: !GetAtt AnalyticsDeadLetterQueue.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-analytics-dlq-arn
   ModelApiLogGroupName:
     Value: !Ref ModelApiLogGroup
     Export:

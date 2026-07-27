@@ -1,203 +1,145 @@
-name: Infrastructure - Provision Platform
+name: Infrastructure - Update Production
 
 on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "apps/event-worker/**"
+      - ".github/workflows/infrastructure.yml"
   workflow_dispatch:
     inputs:
       environment:
-        description: GitHub Environment and deployment target
+        description: Production is the only supported environment
         required: true
         default: production
         type: choice
-        options:
-          - production
+        options: [production]
       confirmation:
-        description: Type PROVISION to create/update billable AWS resources
+        description: Type UPDATE to update AWS infrastructure
         required: true
         type: string
 
 concurrency:
-  group: infrastructure-${{ inputs.environment }}
+  group: infrastructure-production
   cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
   AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
-  FOUNDATION_STACK: customer-ops-${{ inputs.environment }}-foundation
-  RUNTIME_STACK: customer-ops-${{ inputs.environment }}-runtime
-  MODEL_BUCKET_NAME: ${{ vars.MODEL_BUCKET_NAME || 'customer-ops-models' }}
-  MODEL_OBJECT_KEY: ${{ vars.MODEL_OBJECT_KEY || 'models/customer-ops/customer-ops-q4_k_m.gguf' }}
-  EMBEDDING_MODEL_PREFIX: ${{ vars.EMBEDDING_MODEL_PREFIX || 'models/customer-ops/bge-m3-onnx/' }}
-  RERANK_MODEL_PREFIX: ${{ vars.RERANK_MODEL_PREFIX || 'models/customer-ops/bge-reranker-v2-m3-onnx/' }}
+  FOUNDATION_STACK: customer-ops-production-foundation
+  RUNTIME_STACK: customer-ops-production-runtime
 
 jobs:
-  provision:
-    name: Provision ${{ inputs.environment }}
-    if: inputs.confirmation == 'PROVISION'
+  validate:
+    name: Validate templates and event worker
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ inputs.environment }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Validate required configuration
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: 1.94.1
+          components: rustfmt, clippy
+      - name: Event worker formatting
+        working-directory: apps/event-worker
+        run: cargo fmt --all -- --check
+      - name: Event worker clippy
+        working-directory: apps/event-worker
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Event worker tests
+        working-directory: apps/event-worker
+        run: cargo test
+      - name: Check production-only template defaults
         run: |
-          : "${DATABASE_URL:?Configure DATABASE_URL as a GitHub Environment secret}"
-          : "${CLOUDFLARE_ACCOUNT_ID:?Configure CLOUDFLARE_ACCOUNT_ID in the GitHub Environment}"
-          : "${CLOUDFLARE_API_TOKEN:?Configure CLOUDFLARE_API_TOKEN in the GitHub Environment}"
+          grep -q 'customer-ops-${Environment}-operations' infra/cloudformation/runtime.yml
+          grep -q 'syn-nodejs-puppeteer-17.0' infra/cloudformation/runtime.yml
+          grep -q 'FunctionResponseTypes: \[ReportBatchItemFailures\]' infra/cloudformation/runtime.yml
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+  update:
+    name: Update production infrastructure
+    if: github.event_name == 'workflow_dispatch' && inputs.confirmation == 'UPDATE'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: 1.94.1
+          bins: cargo-lambda
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Validate CloudFormation templates
+      - name: Require existing production stacks
+        run: |
+          aws cloudformation describe-stacks --stack-name "${FOUNDATION_STACK}" >/dev/null
+          aws cloudformation describe-stacks --stack-name "${RUNTIME_STACK}" >/dev/null
+
+      - name: Validate CloudFormation
         run: |
           aws cloudformation validate-template \
-            --template-body file://infra/cloudformation/foundation.yml \
-            >/dev/null
+            --template-body file://infra/cloudformation/foundation.yml >/dev/null
           aws cloudformation validate-template \
-            --template-body file://infra/cloudformation/runtime.yml \
-            >/dev/null
+            --template-body file://infra/cloudformation/runtime.yml >/dev/null
 
-      - name: Verify model artifacts
+      - name: Read current application artifacts
         run: |
-          aws s3api head-object \
-            --bucket "${MODEL_BUCKET_NAME}" \
-            --key "${MODEL_OBJECT_KEY}"
-          for prefix in "${EMBEDDING_MODEL_PREFIX}" "${RERANK_MODEL_PREFIX}"; do
-            for artifact in SHA256SUMS model.onnx model.onnx_data tokenizer.json; do
-              aws s3api head-object \
-                --bucket "${MODEL_BUCKET_NAME}" \
-                --key "${prefix}${artifact}" \
-                >/dev/null
-            done
-          done
-
-      - name: Deploy foundation stack
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN || 'https://placeholder.invalid' }}
-        run: |
-          aws cloudformation deploy \
-            --stack-name "${FOUNDATION_STACK}" \
-            --template-file infra/cloudformation/foundation.yml \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              Environment="${{ inputs.environment }}" \
-              DatabaseUrl="${DATABASE_URL}" \
-              FrontendOrigin="${FRONTEND_ORIGIN}" \
-              ModelBucketName="${MODEL_BUCKET_NAME}" \
-              ModelObjectKey="${MODEL_OBJECT_KEY}" \
-              EmbeddingModelPrefix="${EMBEDDING_MODEL_PREFIX}" \
-              RerankModelPrefix="${RERANK_MODEL_PREFIX}"
-
-      - name: Read foundation outputs
-        id: foundation
-        run: |
+          parameter() {
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" \
+              --output text
+          }
           artifact_bucket="$(
             aws cloudformation describe-stacks \
               --stack-name "${FOUNDATION_STACK}" \
               --query "Stacks[0].Outputs[?OutputKey=='DeploymentBucketName'].OutputValue" \
               --output text
           )"
-          model_api_repository_uri="$(
-            aws cloudformation describe-stacks \
-              --stack-name "${FOUNDATION_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='ModelApiRepositoryUri'].OutputValue" \
-              --output text
-          )"
-          model_server_repository_uri="$(
-            aws cloudformation describe-stacks \
-              --stack-name "${FOUNDATION_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='ModelServerRepositoryUri'].OutputValue" \
-              --output text
-          )"
           {
             echo "ARTIFACT_BUCKET=${artifact_bucket}"
-            echo "MODEL_API_REPOSITORY_URI=${model_api_repository_uri}"
-            echo "MODEL_SERVER_REPOSITORY_URI=${model_server_repository_uri}"
+            echo "BACKEND_CODE_BUCKET=$(parameter BackendLambdaCodeBucket)"
+            echo "BACKEND_CODE_KEY=$(parameter BackendLambdaCodeKey)"
+            echo "MODEL_API_IMAGE=$(parameter ModelApiImageUri)"
+            echo "MODEL_SERVER_IMAGE=$(parameter ModelServerImageUri)"
+            echo "MODEL_BUCKET=$(parameter ModelBucketName)"
+            echo "MODEL_OBJECT_KEY=$(parameter ModelObjectKey)"
+            echo "EMBEDDING_PREFIX=$(parameter EmbeddingModelPrefix)"
+            echo "RERANK_PREFIX=$(parameter RerankModelPrefix)"
+            echo "MODEL_SHA256=$(parameter ModelSha256)"
           } >> "${GITHUB_ENV}"
-          {
-            echo "artifact_bucket=${artifact_bucket}"
-            echo "model_api_repository_uri=${model_api_repository_uri}"
-            echo "model_server_repository_uri=${model_server_repository_uri}"
-          } >> "${GITHUB_OUTPUT}"
 
-      - name: Set up Rust and Cargo Lambda
-        uses: moonrepo/setup-rust@v1
-        with:
-          channel: 1.94.1
-          bins: cargo-lambda
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: "0.14.0"
-
-      - name: Build and upload backend Lambda
-        working-directory: apps/backend
+      - name: Build and upload event worker
+        working-directory: apps/event-worker
         run: |
-          cargo lambda build \
-            --release \
-            --output-format zip \
-            --bin lambda \
-            --features lambda,sns
-          lambda_key="lambda/${{ inputs.environment }}/${GITHUB_SHA}/bootstrap.zip"
+          cargo lambda build --release --output-format zip --bin event-worker
+          key="lambda/production/event-worker/${GITHUB_SHA}/bootstrap.zip"
           aws s3 cp \
-            target/lambda/lambda/bootstrap.zip \
-            "s3://${ARTIFACT_BUCKET}/${lambda_key}" \
+            target/lambda/event-worker/bootstrap.zip \
+            "s3://${ARTIFACT_BUCKET}/${key}" \
             --only-show-errors
-          echo "LAMBDA_CODE_KEY=${lambda_key}" >> "${GITHUB_ENV}"
+          echo "EVENT_WORKER_CODE_KEY=${key}" >> "${GITHUB_ENV}"
 
-      - name: Sign in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push model-api image
-        uses: docker/build-push-action@v6
-        with:
-          context: apps/model-api
-          file: apps/model-api/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.foundation.outputs.model_api_repository_uri }}:${{ github.sha }}
-          cache-from: type=gha,scope=model-api
-          cache-to: type=gha,mode=max,scope=model-api
-
-      - name: Build and push CPU model-server image
-        uses: docker/build-push-action@v6
-        with:
-          context: apps/model-server
-          file: apps/model-server/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.foundation.outputs.model_server_repository_uri }}:${{ github.sha }}
-          cache-from: type=gha,scope=model-server
-          cache-to: type=gha,mode=max,scope=model-server
-
-      - name: Read optional model checksum
+      - name: Update foundation without replacing secrets
         run: |
-          checksum="$(
-            aws s3 cp \
-              "s3://${MODEL_BUCKET_NAME}/${MODEL_OBJECT_KEY}.sha256" - \
-              --only-show-errors 2>/dev/null | awk '{print $1}' || true
-          )"
-          echo "MODEL_SHA256=${checksum}" >> "${GITHUB_ENV}"
+          aws cloudformation deploy \
+            --stack-name "${FOUNDATION_STACK}" \
+            --template-file infra/cloudformation/foundation.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides Environment=production
 
-      - name: Deploy runtime stack
+      - name: Update runtime while preserving application artifacts
         run: |
           aws cloudformation deploy \
             --stack-name "${RUNTIME_STACK}" \
@@ -205,87 +147,34 @@ jobs:
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
-              Environment="${{ inputs.environment }}" \
-              BackendLambdaCodeBucket="${ARTIFACT_BUCKET}" \
-              BackendLambdaCodeKey="${LAMBDA_CODE_KEY}" \
-              ModelApiImageUri="${MODEL_API_REPOSITORY_URI}:${GITHUB_SHA}" \
-              ModelServerImageUri="${MODEL_SERVER_REPOSITORY_URI}:${GITHUB_SHA}" \
-              ModelBucketName="${MODEL_BUCKET_NAME}" \
+              Environment=production \
+              BackendLambdaCodeBucket="${BACKEND_CODE_BUCKET}" \
+              BackendLambdaCodeKey="${BACKEND_CODE_KEY}" \
+              EventWorkerLambdaCodeKey="${EVENT_WORKER_CODE_KEY}" \
+              ModelApiImageUri="${MODEL_API_IMAGE}" \
+              ModelServerImageUri="${MODEL_SERVER_IMAGE}" \
+              ModelBucketName="${MODEL_BUCKET}" \
               ModelObjectKey="${MODEL_OBJECT_KEY}" \
-              EmbeddingModelPrefix="${EMBEDDING_MODEL_PREFIX}" \
-              RerankModelPrefix="${RERANK_MODEL_PREFIX}" \
-              ModelSha256="${MODEL_SHA256}"
+              EmbeddingModelPrefix="${EMBEDDING_PREFIX}" \
+              RerankModelPrefix="${RERANK_PREFIX}" \
+              ModelSha256="${MODEL_SHA256}" \
+              BackendCanaryPercent=0
 
-      - name: Read runtime endpoints
-        id: runtime
+      - name: Verify infrastructure outputs
         run: |
-          backend_url="$(
-            aws cloudformation describe-stacks \
-              --stack-name "${RUNTIME_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='BackendApiUrl'].OutputValue" \
-              --output text
-          )"
-          model_api_url="$(
-            aws cloudformation describe-stacks \
-              --stack-name "${RUNTIME_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='ModelApiLoadBalancerUrl'].OutputValue" \
-              --output text
-          )"
-          {
-            echo "BACKEND_API_URL=${backend_url}"
-            echo "MODEL_API_URL=${model_api_url}"
-          } >> "${GITHUB_ENV}"
-          {
-            echo "backend_api_url=${backend_url}"
-            echo "model_api_url=${model_api_url}"
-          } >> "${GITHUB_OUTPUT}"
+          aws cloudformation describe-stacks \
+            --stack-name "${RUNTIME_STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='OperationsDashboardName'||OutputKey=='ApiHealthCanaryName'||OutputKey=='EventWorkerFunctionName'].[OutputKey,OutputValue]" \
+            --output table
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.13.1
-          run_install: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/frontend/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        working-directory: apps/frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend Worker
-        working-directory: apps/frontend
-        env:
-          VITE_API_BASE_URL: /backend-api
-          VITE_CHAT_API_BASE_URL: /model-api
-        run: pnpm build:worker
-
-      - name: Create or update Cloudflare Worker
-        id: cloudflare
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: apps/frontend
-          command: >-
-            deploy --env ${{ inputs.environment }}
-            --var SSR_API_BASE_URL:${{ steps.runtime.outputs.backend_api_url }}
-            --var MODEL_API_BASE_URL:${{ steps.runtime.outputs.model_api_url }}
-
-      - name: Deployment summary
+      - name: Summary
         run: |
           {
-            echo "### Customer Ops platform"
+            echo "### Production infrastructure updated"
             echo
-            echo "- Environment: \`${{ inputs.environment }}\`"
-            echo "- Foundation stack: \`${FOUNDATION_STACK}\`"
-            echo "- Runtime stack: \`${RUNTIME_STACK}\`"
-            echo "- Backend API: \`${BACKEND_API_URL}\`"
-            echo "- Model API origin: \`${MODEL_API_URL}\`"
-            echo "- Frontend URL: \`${{ steps.cloudflare.outputs.deployment-url }}\`"
-            echo "- Model inference: GGUF + BGE-M3 + BGE Reranker on CPU Fargate (4 vCPU / 16 GiB)"
+            echo "- Existing backend artifact preserved: \`${BACKEND_CODE_KEY}\`"
+            echo "- Existing model-api image preserved: \`${MODEL_API_IMAGE}\`"
+            echo "- Existing model-server image preserved: \`${MODEL_SERVER_IMAGE}\`"
+            echo "- API Gateway canary traffic forced to \`0%\`"
+            echo "- No frontend deployment was performed"
           } >> "${GITHUB_STEP_SUMMARY}"

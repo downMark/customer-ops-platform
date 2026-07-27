@@ -9,6 +9,8 @@ Parameters:
     Type: String
   BackendLambdaCodeKey:
     Type: String
+  EventWorkerLambdaCodeKey:
+    Type: String
   ModelApiImageUri:
     Type: String
   ModelServerImageUri:
@@ -56,9 +58,40 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: sns:Publish
+                Action:
+                  - sns:Publish
+                  - sns:GetTopicAttributes
                 Resource:
                   Fn::ImportValue: !Sub customer-ops-${Environment}-domain-events-topic
+        - PolicyName: OperationsStatusAndDrills
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:StartMessageMoveTask
+                  - sqs:ListMessageMoveTasks
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:SendMessage
+                Resource:
+                  - Fn::ImportValue: !Sub customer-ops-${Environment}-quality-queue-arn
+                  - Fn::ImportValue: !Sub customer-ops-${Environment}-analytics-queue-arn
+                  - Fn::ImportValue: !Sub customer-ops-${Environment}-quality-dlq-arn
+                  - Fn::ImportValue: !Sub customer-ops-${Environment}-analytics-dlq-arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  Fn::ImportValue: !Sub customer-ops-${Environment}-failure-drills-table-arn
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricStatistics
+                Resource: "*"
 
   BackendFunction:
     Type: AWS::Lambda::Function
@@ -93,7 +126,102 @@ Resources:
             Fn::ImportValue: !Sub customer-ops-${Environment}-frontend-origin
           SNS_TOPIC_ARN:
             Fn::ImportValue: !Sub customer-ops-${Environment}-domain-events-topic
+          OPERATIONS_TABLE_NAME:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-failure-drills-table
+          QUALITY_QUEUE_URL:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-quality-queue-url
+          ANALYTICS_QUEUE_URL:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-analytics-queue-url
+          QUALITY_DLQ_URL:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-quality-dlq-url
+          ANALYTICS_DLQ_URL:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-analytics-dlq-url
+          OPERATIONS_ALARM_NAMES: !Sub >-
+            customer-ops-${Environment}-quality-dlq,
+            customer-ops-${Environment}-analytics-dlq,
+            customer-ops-${Environment}-api-health-canary,
+            customer-ops-${Environment}-backend-canary-errors,
+            customer-ops-${Environment}-backend-api-5xx
           RUST_LOG: info,customer_ops_backend=info
+
+  EventWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/customer-ops-${Environment}-event-worker
+      RetentionInDays: 30
+
+  EventWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-event-worker
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConsumeDomainEventQueues
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - Fn::ImportValue: !Sub customer-ops-${Environment}-quality-queue-arn
+                  - Fn::ImportValue: !Sub customer-ops-${Environment}-analytics-queue-arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  Fn::ImportValue: !Sub customer-ops-${Environment}-failure-drills-table-arn
+
+  EventWorkerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: EventWorkerLogGroup
+    Properties:
+      FunctionName: !Sub customer-ops-${Environment}-event-worker
+      Description: Consumes quality and analytics domain events, including controlled DLQ drills
+      Runtime: provided.al2023
+      Handler: bootstrap
+      Architectures: [x86_64]
+      MemorySize: 256
+      Timeout: 5
+      Role: !GetAtt EventWorkerRole.Arn
+      Code:
+        S3Bucket: !Ref BackendLambdaCodeBucket
+        S3Key: !Ref EventWorkerLambdaCodeKey
+      Environment:
+        Variables:
+          OPERATIONS_TABLE_NAME:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-failure-drills-table
+          RUST_LOG: info,customer_ops_event_worker=info
+
+  QualityQueueEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref EventWorkerFunction
+      EventSourceArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-quality-queue-arn
+      BatchSize: 1
+      Enabled: true
+      FunctionResponseTypes: [ReportBatchItemFailures]
+
+  AnalyticsQueueEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref EventWorkerFunction
+      EventSourceArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-analytics-queue-arn
+      BatchSize: 1
+      Enabled: true
+      FunctionResponseTypes: [ReportBatchItemFailures]
 
   BackendInitialVersion:
     Type: AWS::Lambda::Version
@@ -221,6 +349,8 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
 
   BackendApi5xxAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -241,6 +371,149 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  QualityDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-quality-dlq
+      AlarmDescription: Quality dead-letter queue contains one or more messages.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub customer-ops-${Environment}-quality-dlq
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  AnalyticsDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-analytics-dlq
+      AlarmDescription: Analytics dead-letter queue contains one or more messages.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub customer-ops-${Environment}-analytics-dlq
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  SyntheticsCanaryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-synthetics-api-health
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunApiHealthCanary
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${BackendLambdaCodeBucket}
+                  - !Sub arn:${AWS::Partition}:s3:::${BackendLambdaCodeBucket}/synthetics/${Environment}/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - cloudwatch:PutMetricData
+                  - xray:PutTraceSegments
+                Resource: "*"
+
+  ApiHealthCanary:
+    Type: AWS::Synthetics::Canary
+    Properties:
+      Name: !Sub cops-${Environment}-api
+      ArtifactS3Location: !Sub s3://${BackendLambdaCodeBucket}/synthetics/${Environment}/
+      ExecutionRoleArn: !GetAtt SyntheticsCanaryRole.Arn
+      RuntimeVersion: syn-nodejs-puppeteer-17.0
+      StartCanaryAfterCreation: true
+      SuccessRetentionPeriod: 31
+      FailureRetentionPeriod: 31
+      Schedule:
+        Expression: rate(5 minutes)
+        DurationInSeconds: "0"
+      RunConfig:
+        TimeoutInSeconds: 30
+        EnvironmentVariables:
+          HEALTH_URL: !Sub https://${BackendRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${Environment}/api/health
+      Code:
+        Handler: index.handler
+        Script: |
+          const synthetics = require('Synthetics');
+          const log = require('SyntheticsLogger');
+
+          exports.handler = async () => {
+            const url = process.env.HEALTH_URL;
+            await synthetics.executeHttpStep('backend-api-health', {
+              hostname: new URL(url).hostname,
+              method: 'GET',
+              path: new URL(url).pathname,
+              port: 443,
+              protocol: 'https:'
+            }, async (response) => {
+              let body = '';
+              response.on('data', chunk => { body += chunk; });
+              await new Promise((resolve, reject) => {
+                response.on('end', resolve);
+                response.on('error', reject);
+              });
+              if (response.statusCode !== 200) {
+                throw new Error('Expected HTTP 200, received ' + response.statusCode);
+              }
+              const parsed = JSON.parse(body);
+              if (!parsed.success || !parsed.data || parsed.data.status !== 'ok') {
+                log.error('Unexpected health response: ' + body);
+                throw new Error('Health response contract failed');
+              }
+            });
+          };
+
+  ApiHealthCanaryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-api-health-canary
+      AlarmDescription: Production backend API health canary failed.
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Ref ApiHealthCanary
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
 
   ModelServerLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -391,6 +664,9 @@ Resources:
       Name: !Sub cops-${Environment}-api
       Scheme: internet-facing
       Type: application
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "300"
       SecurityGroups:
         - Fn::ImportValue: !Sub customer-ops-${Environment}-alb-sg
       Subnets:
@@ -520,6 +796,120 @@ Resources:
           ContainerPort: 4111
           TargetGroupArn: !Ref ModelApiTargetGroup
 
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub customer-ops-${Environment}-operations
+      DashboardBody: !Sub |
+        {
+          "start": "-PT6H",
+          "periodOverride": "inherit",
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Synthetics API health",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "metrics": [
+                  ["CloudWatchSynthetics", "SuccessPercent", "CanaryName", "${ApiHealthCanary}", {"stat": "Average"}],
+                  [".", "Duration", ".", ".", {"stat": "Average", "yAxis": "right"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "API Gateway traffic and errors",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", "ApiName", "customer-ops-${Environment}-backend", "Stage", "${Environment}", {"stat": "Sum"}],
+                  [".", "4XXError", ".", ".", ".", ".", {"stat": "Sum"}],
+                  [".", "5XXError", ".", ".", ".", ".", {"stat": "Sum"}],
+                  [".", "Latency", ".", ".", ".", ".", {"stat": "p95", "yAxis": "right"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Backend stable / canary Lambda",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${BackendFunction}", "Resource", "${BackendFunction}:stable", {"stat": "Sum"}],
+                  [".", "Errors", ".", ".", ".", ".", {"stat": "Sum"}],
+                  [".", "Duration", ".", ".", ".", ".", {"stat": "p95", "yAxis": "right"}],
+                  [".", "Invocations", ".", ".", ".", "${BackendFunction}:canary", {"stat": "Sum"}],
+                  [".", "Errors", ".", ".", ".", ".", {"stat": "Sum"}],
+                  [".", "Throttles", ".", ".", ".", ".", {"stat": "Sum"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "SNS domain events",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/SNS", "NumberOfMessagesPublished", "TopicName", "customer-ops-${Environment}-domain-events", {"stat": "Sum"}],
+                  [".", "NumberOfNotificationsFailed", ".", ".", {"stat": "Sum"}],
+                  [".", "NumberOfNotificationsDelivered", ".", ".", {"stat": "Sum"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 12, "width": 24, "height": 7,
+              "properties": {
+                "title": "SQS main queues and DLQs",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "customer-ops-${Environment}-quality", {"stat": "Maximum"}],
+                  [".", ".", ".", "customer-ops-${Environment}-analytics", {"stat": "Maximum"}],
+                  [".", ".", ".", "customer-ops-${Environment}-quality-dlq", {"stat": "Maximum"}],
+                  [".", ".", ".", "customer-ops-${Environment}-analytics-dlq", {"stat": "Maximum"}],
+                  [".", "ApproximateNumberOfMessagesNotVisible", ".", "customer-ops-${Environment}-quality", {"stat": "Maximum"}],
+                  [".", ".", ".", "customer-ops-${Environment}-analytics", {"stat": "Maximum"}],
+                  [".", "ApproximateAgeOfOldestMessage", ".", "customer-ops-${Environment}-quality-dlq", {"stat": "Maximum", "yAxis": "right"}],
+                  [".", ".", ".", "customer-ops-${Environment}-analytics-dlq", {"stat": "Maximum", "yAxis": "right"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 19, "width": 24, "height": 6,
+              "properties": {
+                "title": "ECS service capacity",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ClusterName", "customer-ops-${Environment}", "ServiceName", "customer-ops-${Environment}-model-api", {"stat": "Average"}],
+                  [".", "MemoryUtilization", ".", ".", ".", ".", {"stat": "Average"}],
+                  [".", "CPUUtilization", ".", ".", ".", "customer-ops-${Environment}-model-server", {"stat": "Average"}],
+                  [".", "MemoryUtilization", ".", ".", ".", ".", {"stat": "Average"}]
+                ]
+              }
+            },
+            {
+              "type": "alarm",
+              "x": 0, "y": 25, "width": 24, "height": 5,
+              "properties": {
+                "title": "Production alarms",
+                "alarms": [
+                  "${BackendCanaryErrorAlarm.Arn}",
+                  "${BackendApi5xxAlarm.Arn}",
+                  "${QualityDlqAlarm.Arn}",
+                  "${AnalyticsDlqAlarm.Arn}",
+                  "${ApiHealthCanaryAlarm.Arn}"
+                ]
+              }
+            }
+          ]
+        }
+
 Outputs:
   BackendLambdaFunctionName:
     Value: !Ref BackendFunction
@@ -554,3 +944,9 @@ Outputs:
     Value: !Sub customer-ops-${Environment}-model-api
   ModelServerTaskDefinitionFamily:
     Value: !Sub customer-ops-${Environment}-model-server
+  EventWorkerFunctionName:
+    Value: !Ref EventWorkerFunction
+  ApiHealthCanaryName:
+    Value: !Ref ApiHealthCanary
+  OperationsDashboardName:
+    Value: !Ref OperationsDashboard

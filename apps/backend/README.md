@@ -36,6 +36,10 @@
 | POST | `/api/orders`                                    | Bearer（必需） | 创建多商品订单并原子扣减库存     |
 | GET  | `/api/orders/{orderId}`                          | Bearer（必需） | 查询订单及商品明细               |
 | POST | `/api/conversations/{conversationId}/complete`   | Bearer（必需） | 记录对话完成并发布 SNS 事件（幂等）|
+| POST | `/api/knowledge/search`                         | Bearer（必需） | 1024 维向量检索知识分块          |
+| GET  | `/api/ops/aws-status`                          | Bearer（必需） | 查看 SNS、SQS、DLQ 和告警状态    |
+| POST | `/api/ops/failure-tests`                       | admin Bearer   | 触发受控的真实 DLQ 演练          |
+| POST | `/api/ops/failure-tests/{testId}/recover`      | admin Bearer   | 解除故障并启动两个 DLQ redrive   |
 | GET  | `/api/health`                                    | 无             | 健康检查                         |
 
 > 契约提示：model-api 现期望扁平订单 JSON，本服务统一封装后订单在 `data` 内；`/complete` 端点契约为本项目自定 —— 均由 model-api 后续适配（见 specs/LESSONS.md）。
@@ -103,6 +107,9 @@ cargo lambda build --release --bin lambda --features lambda
 
 # 需要真实发布 SNS 事件时
 cargo lambda build --release --bin lambda --features lambda,sns
+
+# production：同时启用 SNS 与 AWS 运行状态/故障演练
+cargo lambda build --release --bin lambda --features lambda,sns,ops
 ```
 
 Lambda 环境至少配置：
@@ -113,6 +120,9 @@ Lambda 环境至少配置：
 - `CORS_ORIGINS`：允许直接调用订单接口的 Cloudflare 前端 Origin，逗号分隔。
 - `DB_MAX_CONNECTIONS`：建议 1–2，避免多个冷启动放大数据库连接数。
 - `SNS_TOPIC_ARN`：启用 `sns` feature 时配置，并给执行角色 `sns:Publish`。
+- `OPERATIONS_TABLE_NAME`、主队列及 DLQ 的四个 `*_QUEUE_URL` / `*_DLQ_URL`：
+  启用 `ops` feature 时由 CloudFormation 注入；浏览器不直接访问 AWS。
+- `OPERATIONS_ALARM_NAMES`：逗号分隔的 CloudWatch Alarm 名称。
 
 ## 知识检索
 

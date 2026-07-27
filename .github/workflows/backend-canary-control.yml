@@ -1,0 +1,151 @@
+name: Backend - Canary Control
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        default: production
+        type: choice
+        options: [production]
+      operation:
+        description: Inspect, change traffic, promote, or roll back
+        required: true
+        type: choice
+        options: [status, set-percent, promote, rollback]
+      percent:
+        description: Used only by set-percent
+        required: true
+        default: "0.10"
+        type: choice
+        options: ["0", "0.10", "0.25", "0.50", "1.0"]
+
+concurrency:
+  group: backend-canary-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
+      RUNTIME_STACK: customer-ops-production-runtime
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Discover production resources
+        run: |
+          output() {
+            aws cloudformation describe-stacks \
+              --stack-name "${RUNTIME_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          {
+            echo "FUNCTION_NAME=$(output BackendLambdaFunctionName)"
+            echo "REST_API_ID=$(output BackendRestApiId)"
+            echo "STAGE_NAME=$(output BackendApiStageName)"
+            echo "CANARY_ALARM=$(output BackendCanaryErrorAlarmName)"
+            echo "API_ALARM=$(output BackendApi5xxAlarmName)"
+            echo "SYNTHETICS_CANARY=$(output ApiHealthCanaryName)"
+          } >> "${GITHUB_ENV}"
+
+      - name: Enforce health gate for traffic increases and promotion
+        if: inputs.operation == 'promote' || (inputs.operation == 'set-percent' && inputs.percent != '0')
+        run: |
+          alarm_states="$(
+            aws cloudwatch describe-alarms \
+              --alarm-names "${CANARY_ALARM}" "${API_ALARM}" \
+              --query 'MetricAlarms[].StateValue' \
+              --output text
+          )"
+          if echo "${alarm_states}" | grep -Eq 'ALARM|INSUFFICIENT_DATA'; then
+            echo "::error::CloudWatch alarms are not all OK: ${alarm_states}"
+            exit 1
+          fi
+          latest_run="$(
+            aws synthetics get-canary-runs \
+              --name "${SYNTHETICS_CANARY}" \
+              --max-results 1 \
+              --query 'CanaryRuns[0].Status.State' \
+              --output text
+          )"
+          if [ "${latest_run}" != "PASSED" ]; then
+            echo "::error::Latest Synthetics run is ${latest_run}; expected PASSED"
+            exit 1
+          fi
+
+      - name: Apply requested operation
+        run: |
+          case "${{ inputs.operation }}" in
+            status)
+              ;;
+            set-percent)
+              aws apigateway update-stage \
+                --rest-api-id "${REST_API_ID}" \
+                --stage-name "${STAGE_NAME}" \
+                --patch-operations \
+                  op=replace,path=/canarySettings/percentTraffic,value="${{ inputs.percent }}" \
+                  op=replace,path=/canarySettings/stageVariableOverrides/lambdaAlias,value=canary \
+                >/dev/null
+              ;;
+            promote)
+              candidate="$(
+                aws lambda get-alias \
+                  --function-name "${FUNCTION_NAME}" \
+                  --name canary \
+                  --query FunctionVersion \
+                  --output text
+              )"
+              aws lambda update-alias \
+                --function-name "${FUNCTION_NAME}" \
+                --name stable \
+                --function-version "${candidate}" >/dev/null
+              aws apigateway update-stage \
+                --rest-api-id "${REST_API_ID}" \
+                --stage-name "${STAGE_NAME}" \
+                --patch-operations \
+                  op=replace,path=/canarySettings/percentTraffic,value=0 >/dev/null
+              ;;
+            rollback)
+              aws apigateway update-stage \
+                --rest-api-id "${REST_API_ID}" \
+                --stage-name "${STAGE_NAME}" \
+                --patch-operations \
+                  op=replace,path=/canarySettings/percentTraffic,value=0 >/dev/null
+              ;;
+          esac
+
+      - name: Report current state
+        run: |
+          stable="$(
+            aws lambda get-alias --function-name "${FUNCTION_NAME}" --name stable \
+              --query FunctionVersion --output text
+          )"
+          canary="$(
+            aws lambda get-alias --function-name "${FUNCTION_NAME}" --name canary \
+              --query FunctionVersion --output text
+          )"
+          traffic="$(
+            aws apigateway get-stage \
+              --rest-api-id "${REST_API_ID}" --stage-name "${STAGE_NAME}" \
+              --query 'canarySettings.percentTraffic' --output text
+          )"
+          {
+            echo "### Backend production canary"
+            echo
+            echo "- Operation: \`${{ inputs.operation }}\`"
+            echo "- Stable version: \`${stable}\`"
+            echo "- Canary version: \`${canary}\`"
+            echo "- Canary traffic: \`${traffic}\`"
+            echo "- Changes are manual; alarms never modify traffic automatically"
+          } >> "${GITHUB_STEP_SUMMARY}"
