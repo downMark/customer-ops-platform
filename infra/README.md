@@ -70,8 +70,10 @@ atomic instead of relying on an in-place capacity-provider conversion.
 
 The GitHub deployment role needs the existing CloudFormation/S3/IAM deployment
 permissions plus Lambda Event Worker updates, API Gateway stage reads/writes,
-Lambda alias reads/writes, `cloudwatch:DescribeAlarms`, and
-`synthetics:GetCanaryRuns`. GPU preflight additionally needs
+Lambda alias reads/writes, `cloudwatch:DescribeAlarms`, and the Synthetics
+canary lifecycle actions (`CreateCanary`, `GetCanary`, `GetCanaryRuns`,
+`UpdateCanary`, `DeleteCanary`, `StartCanary`, `StopCanary`, `TagResource`,
+`UntagResource`, and `ListTagsForResource`). GPU preflight additionally needs
 `servicequotas:GetServiceQuota` and `ec2:DescribeInstanceTypeOfferings`.
 
 ## GPU model-server rollout and rollback

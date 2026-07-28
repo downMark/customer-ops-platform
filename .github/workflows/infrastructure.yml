@@ -75,6 +75,13 @@ jobs:
           grep -q 'FunctionResponseTypes: \[ReportBatchItemFailures\]' infra/cloudformation/runtime.yml
           grep -q 'ECS_ENABLE_GPU_SUPPORT=true' infra/cloudformation/foundation.yml
           grep -q 'Type: GPU' infra/cloudformation/runtime.yml
+          grep -q 'GroupDescription: CPU model-server Fargate tasks' infra/cloudformation/foundation.yml
+          grep -q 'Service: logs.amazonaws.com' infra/cloudformation/foundation.yml
+          performance_bucket="customer-ops-production-perf-123456789012-ap-northeast-1"
+          if [ "${#performance_bucket}" -gt 63 ]; then
+            echo "::error::Performance detail bucket name exceeds the S3 63-character limit."
+            exit 1
+          fi
 
   update:
     name: Update production infrastructure
@@ -232,12 +239,19 @@ jobs:
 
       - name: Update foundation without replacing secrets
         run: |
-          aws cloudformation deploy \
-            --stack-name "${FOUNDATION_STACK}" \
-            --template-file infra/cloudformation/foundation.yml \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides Environment=production
+          if ! aws cloudformation deploy \
+              --stack-name "${FOUNDATION_STACK}" \
+              --template-file infra/cloudformation/foundation.yml \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changeset \
+              --parameter-overrides Environment=production; then
+            aws cloudformation describe-stack-events \
+              --stack-name "${FOUNDATION_STACK}" \
+              --max-items 40 \
+              --query "StackEvents[?ResourceStatusReason != null].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]" \
+              --output table
+            exit 1
+          fi
 
       - name: Build and publish performance cleaner
         run: |
@@ -260,27 +274,34 @@ jobs:
 
       - name: Update runtime while preserving application artifacts
         run: |
-          aws cloudformation deploy \
-            --stack-name "${RUNTIME_STACK}" \
-            --template-file infra/cloudformation/runtime.yml \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              Environment=production \
-              BackendLambdaCodeBucket="${BACKEND_CODE_BUCKET}" \
-              BackendLambdaCodeKey="${BACKEND_CODE_KEY}" \
-              EventWorkerLambdaCodeKey="${EVENT_WORKER_CODE_KEY}" \
-              ModelApiImageUri="${MODEL_API_IMAGE}" \
-              ModelServerImageUri="${MODEL_SERVER_IMAGE}" \
-              PerformanceCleanerImageUri="${PERFORMANCE_CLEANER_IMAGE}" \
-              ModelBucketName="${MODEL_BUCKET}" \
-              ModelObjectKey="${MODEL_OBJECT_KEY}" \
-              EmbeddingModelPrefix="${EMBEDDING_PREFIX}" \
-              RerankModelPrefix="${RERANK_PREFIX}" \
-              ModelSha256="${MODEL_SHA256}" \
-              ModelServerComputeType="${{ inputs.model_server_compute }}" \
-              ModelServerGpuLayers="${MODEL_SERVER_GPU_LAYERS}" \
-              BackendCanaryPercent=0
+          if ! aws cloudformation deploy \
+              --stack-name "${RUNTIME_STACK}" \
+              --template-file infra/cloudformation/runtime.yml \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changeset \
+              --parameter-overrides \
+                Environment=production \
+                BackendLambdaCodeBucket="${BACKEND_CODE_BUCKET}" \
+                BackendLambdaCodeKey="${BACKEND_CODE_KEY}" \
+                EventWorkerLambdaCodeKey="${EVENT_WORKER_CODE_KEY}" \
+                ModelApiImageUri="${MODEL_API_IMAGE}" \
+                ModelServerImageUri="${MODEL_SERVER_IMAGE}" \
+                PerformanceCleanerImageUri="${PERFORMANCE_CLEANER_IMAGE}" \
+                ModelBucketName="${MODEL_BUCKET}" \
+                ModelObjectKey="${MODEL_OBJECT_KEY}" \
+                EmbeddingModelPrefix="${EMBEDDING_PREFIX}" \
+                RerankModelPrefix="${RERANK_PREFIX}" \
+                ModelSha256="${MODEL_SHA256}" \
+                ModelServerComputeType="${{ inputs.model_server_compute }}" \
+                ModelServerGpuLayers="${MODEL_SERVER_GPU_LAYERS}" \
+                BackendCanaryPercent=0; then
+            aws cloudformation describe-stack-events \
+              --stack-name "${RUNTIME_STACK}" \
+              --max-items 40 \
+              --query "StackEvents[?ResourceStatusReason != null].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]" \
+              --output table
+            exit 1
+          fi
 
       - name: Verify infrastructure outputs
         run: |

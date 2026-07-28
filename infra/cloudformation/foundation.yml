@@ -159,7 +159,9 @@ Resources:
   ModelServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Private model-server tasks and GPU container instances
+      # This description is immutable for AWS::EC2::SecurityGroup. Keep the
+      # original value because the exported group is consumed by runtime.yml.
+      GroupDescription: CPU model-server Fargate tasks
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -718,7 +720,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: !Sub logs.${AWS::Region}.${AWS::URLSuffix}
+              # CloudWatch Logs uses the global service principal for
+              # same-account Kinesis subscriptions; the source ARN below
+              # still restricts assumption to this account and region.
+              Service: logs.amazonaws.com
             Action: sts:AssumeRole
             Condition:
               StringLike:
