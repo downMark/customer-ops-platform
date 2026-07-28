@@ -252,7 +252,9 @@ Resources:
   PerformanceDetailBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub customer-ops-${Environment}-performance-detail-${AWS::AccountId}-${AWS::Region}
+      # S3 bucket names are limited to 63 characters. Keep this shorter than
+      # the CloudFormation export name while retaining global uniqueness.
+      BucketName: !Sub customer-ops-${Environment}-perf-${AWS::AccountId}-${AWS::Region}
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:

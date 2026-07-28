@@ -14,13 +14,13 @@
       "Sid": "ListSanitizedPerformanceDetails",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::customer-ops-*-performance-detail*"
+      "Resource": "arn:aws:s3:::customer-ops-*-perf-*"
     },
     {
       "Sid": "ReadSanitizedPerformanceDetails",
       "Effect": "Allow",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::customer-ops-*-performance-detail*/environment=*"
+      "Resource": "arn:aws:s3:::customer-ops-*-perf-*/environment=*"
     }
   ]
 }
