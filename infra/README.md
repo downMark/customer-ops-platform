@@ -8,7 +8,8 @@ only publish code or images after the two platform stacks exist.
 - `customer-ops-<environment>-foundation`
   - VPC, two public subnets, security groups
   - ECR repositories and Lambda artifact bucket
-  - ECS cluster for CPU Fargate services
+  - ECS cluster, Fargate capacity and a scale-from-zero GPU capacity provider
+  - `g4dn.xlarge` GPU Auto Scaling Group using the ECS GPU-optimized AL2023 AMI
   - task roles, log groups, Secrets Manager secrets
   - domain/operations SNS topics, quality/analytics queues and their DLQs
   - DynamoDB failure-drill state
@@ -16,17 +17,20 @@ only publish code or images after the two platform stacks exist.
   - backend Lambda, version aliases, API Gateway REST API and canary stage
   - Event Worker Lambda and SQS event source mappings
   - API health Synthetics Canary, alarms and operations Dashboard
-  - private model-server NLB and CPU Fargate service
+  - private model-server NLB and GPU EC2 ECS service
   - public model-api ALB and Fargate ECS service
 
-The model-server uses 4 vCPU, 16 GiB memory, and 30 GiB ephemeral storage. It
-downloads the merged, quantized GGUF from S3 at task startup and performs CPU
-inference without CUDA.
+The production model-server runs one `g4dn.xlarge` (4 vCPU, 16 GiB RAM,
+NVIDIA T4 16 GiB) through an ECS capacity provider. The task reserves one GPU
+and offloads all supported Qwen layers through CUDA. The instance and model
+endpoint remain private; the instance has outbound internet access only so it
+can pull ECR images and S3 models without adding a NAT Gateway.
 
 The same task downloads `bge-m3-onnx` and `bge-reranker-v2-m3-onnx` from the
 `models/customer-ops/` prefix, verifies each directory's `SHA256SUMS`, and
-serves embedding/rerank through the existing private NLB. The task remains
-4 vCPU and 16 GiB.
+serves embedding/rerank through the existing private NLB. ONNX inference
+continues on CPU, while the shared inference gate prevents it from overlapping
+with peak GGUF generation work.
 
 ## GitHub Environments
 
@@ -55,32 +59,61 @@ Variables:
   it later to the Worker/custom-domain origin to tighten direct backend CORS.
 ## Infrastructure updates
 
-Run **Infrastructure - Update Production** and enter `UPDATE`. This workflow is
-update-only: it requires both stacks to exist, preserves the current Backend
-code key and ECS image URIs, builds the Event Worker, and updates CloudFormation.
-It does not deploy the frontend or roll ECS services.
+Run **Infrastructure - Update Production**, enter `UPDATE`, and select
+`GPU_EC2` (normal production) or `FARGATE` (rollback only). The workflow
+requires both stacks to exist, reads the images from the currently active ECS
+task definitions, builds the Event Worker, and updates CloudFormation. It does
+not deploy the frontend or publish new application images. Changing the compute
+choice intentionally replaces the model-server ECS Service with a distinct
+name. This keeps the launch type, network mode and target-group transition
+atomic instead of relying on an in-place capacity-provider conversion.
 
 The GitHub deployment role needs the existing CloudFormation/S3/IAM deployment
 permissions plus Lambda Event Worker updates, API Gateway stage reads/writes,
 Lambda alias reads/writes, `cloudwatch:DescribeAlarms`, and
-`synthetics:GetCanaryRuns`.
+`synthetics:GetCanaryRuns`. GPU preflight additionally needs
+`servicequotas:GetServiceQuota` and `ec2:DescribeInstanceTypeOfferings`.
 
-## RAG rollout order
+## GPU model-server rollout and rollback
 
-When introducing or changing the BGE models, deploy production in this order:
+Before the first migration, open **Service Quotas → Amazon Elastic Compute
+Cloud (Amazon EC2) → Running On-Demand G and VT instances** in
+`ap-northeast-1` and request at least **4 vCPUs**. New accounts commonly have a
+zero quota. The Infrastructure workflow checks this before changing either
+stack and stops with no infrastructure mutation when the quota is insufficient.
+
+First GPU migration:
 
 1. Commit and push the code.
-2. Run **Infrastructure - Update Production** for `production` with confirmation
-   `UPDATE`. This updates the task role and task-definition
-   model paths while keeping model-server at 4 vCPU / 16 GiB.
-3. Manually run **Python Model Server - Amazon ECS** after the infrastructure
-   update when model-server code or model artifacts changed.
-4. Confirm ECS service stability, then rerun **Model API - Amazon ECS** if
-   necessary.
+2. Run **Infrastructure - Update Production** with confirmation `UPDATE` and
+   compute `GPU_EC2`. It preserves the active CPU image, starts one GPU
+   container instance, and places the existing model-server task there.
+3. Wait until the model-server ECS service is healthy.
+4. Run **Python Model Server - Amazon ECS** with `image_variant=gpu`.
+5. Confirm `/health`, a short chat request, GPU utilization and first-token
+   latency. Model API and frontend do not need redeployment for this migration.
+
+Safe Fargate rollback:
+
+1. While the service is still on GPU EC2, run **Python Model Server - Amazon
+   ECS** with `image_variant=cpu` and wait for stability.
+2. Run **Infrastructure - Update Production** with `model_server_compute=FARGATE`.
+3. Confirm the Fargate task is healthy. The capacity provider then scales the
+   GPU Auto Scaling Group back to zero.
+
+Never switch a CUDA image directly to Fargate: the Fargate host does not expose
+the NVIDIA driver required by the GPU build.
 
 The model-server workflow checks the ONNX artifacts and active task definition
 before replacing the image. Missing RAG configuration fails the workflow
 without starting an unsafe ECS rollout.
+
+At the current Tokyo on-demand price used for planning, one continuously
+running `g4dn.xlarge` is about `$0.71/hour`, `$17.04/day`, or `$51.12` for
+three full days and `$68.16` for four full days, before small EBS, log and
+data-transfer charges. The instance exists only while the GPU ECS service
+desires capacity; selecting the Fargate rollback causes the managed capacity
+provider to return the ASG to zero.
 
 ## Backend canary
 

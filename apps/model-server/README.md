@@ -4,7 +4,7 @@ FastAPI 推理服务，使用 `llama-cpp-python` 直接加载客服 GGUF 模型�
 
 同一进程通过 ONNX Runtime 加载 `bge-m3` 和
 `bge-reranker-v2-m3`，提供知识检索所需的 embedding 与 rerank。三个引擎
-共享推理锁，避免在 16 GiB Task 中并发产生峰值工作区。
+共享推理锁，避免生成、embedding 和 rerank 同时产生峰值工作区。
 
 ## 模型
 
@@ -48,8 +48,14 @@ uv run pytest
 
 ## AWS 部署
 
-生产镜像使用 CPU 版 `llama-cpp-python`，不包含 CUDA。ECS Service 运行在
-Fargate，默认分配 4 vCPU、16 GiB 内存和 30 GiB 临时磁盘。
+Dockerfile 提供两个显式目标：
+
+- `gpu-runtime`：生产默认，使用 CUDA 12.6，并针对 T4 的 compute capability
+  7.5 编译 `llama-cpp-python`。
+- `cpu-runtime`：仅用于切回 Fargate 前的安全回退。
+
+生产 ECS Service 默认放置到 `g4dn.xlarge` GPU capacity provider，分配一张
+NVIDIA T4 16 GiB，并设置 `MODEL_GPU_LAYERS=-1`。
 
 GGUF 不打入镜像。容器启动时，如果 `MODEL_PATH` 不存在，会使用 ECS Task
 Role 从以下地址下载：
@@ -69,7 +75,7 @@ EMBEDDING_MODEL_PATH=/models/bge-m3-onnx/model.onnx
 RERANK_MODEL_PATH=/models/bge-reranker-v2-m3-onnx/model.onnx
 MODEL_HOST=0.0.0.0
 MODEL_PORT=8000
-MODEL_GPU_LAYERS=0
+MODEL_GPU_LAYERS=-1
 MODEL_THREADS=4
 MODEL_DISABLE_THINKING=true
 MODEL_SERVER_API_KEY=<Secrets Manager 注入>
@@ -83,10 +89,11 @@ thinking block，使 OpenAI-compatible `content` 立即开始输出；客服链�
 目录使用各自的 `SHA256SUMS` 逐文件校验。Task Role 需要限定到
 `models/customer-ops/*` 的对象读取和同前缀 ListBucket 权限。
 
-Python Service 仅连接内部 NLB。Fargate Task 在当前无 NAT 的公共子网中分配
-公网 IP 以访问 ECR 和 S3，但 Security Group 入站只允许 Mastra Task
-Security Group 访问 TCP 8000。API Key 是第二层防护，不能代替网络规则。
+Python Service 仅连接内部 NLB。GPU 容器实例位于当前无 NAT 的公共子网，
+通过实例出站网络访问 ECR 和 S3；Security Group 入站只允许 Mastra Task
+Security Group 和内部 NLB 健康检查访问 TCP 8000。API Key 是第二层防护，
+不能代替网络规则。
 
-提交 `apps/model-server/**` 到 `main` 后，
-`.github/workflows/model-server-ecs.yml` 会构建 CPU 镜像、推送 ECR，并滚动
-更新已有 ECS Service。工作流仅支持手动运行，Pull Request 和 push 均不会触发。
+`.github/workflows/model-server-ecs.yml` 仅支持手动运行。正常发布选择
+`image_variant=gpu`；只有在准备把基础设施切回 Fargate 时，才先选择
+`image_variant=cpu`。Pull Request 和 push 均不会自动发布。

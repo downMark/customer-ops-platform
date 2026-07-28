@@ -27,6 +27,18 @@ Parameters:
     Type: String
     Default: models/customer-ops/bge-reranker-v2-m3-onnx/
     AllowedPattern: "^models/customer-ops/[A-Za-z0-9._/-]+/$"
+  GpuInstanceType:
+    Type: String
+    Default: g4dn.xlarge
+    AllowedValues: [g4dn.xlarge]
+  GpuRootVolumeSize:
+    Type: Number
+    Default: 50
+    MinValue: 40
+    MaxValue: 200
+  LatestEcsGpuOptimizedAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended/image_id
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
@@ -147,7 +159,7 @@ Resources:
   ModelServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: CPU model-server Fargate tasks
+      GroupDescription: Private model-server tasks and GPU container instances
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -350,6 +362,133 @@ Resources:
         - Name: containerInsights
           Value: enabled
 
+  GpuContainerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-gpu-container-instance
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  GpuContainerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref GpuContainerInstanceRole
+
+  GpuLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub customer-ops-${Environment}-gpu
+      LaunchTemplateData:
+        ImageId: !Ref LatestEcsGpuOptimizedAmi
+        InstanceType: !Ref GpuInstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt GpuContainerInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref ModelServerSecurityGroup
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              DeleteOnTermination: true
+              Encrypted: true
+              VolumeSize: !Ref GpuRootVolumeSize
+              VolumeType: gp3
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            cat >> /etc/ecs/ecs.config <<'EOF'
+            ECS_CLUSTER=${EcsCluster}
+            ECS_ENABLE_GPU_SUPPORT=true
+            ECS_ENABLE_TASK_IAM_ROLE=true
+            ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
+            EOF
+
+            dnf install -y amazon-cloudwatch-agent
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json <<'EOF'
+            {
+              "agent": {
+                "metrics_collection_interval": 60
+              },
+              "metrics": {
+                "namespace": "CustomerOps/GPU",
+                "append_dimensions": {
+                  "InstanceId": "${!aws:InstanceId}"
+                },
+                "metrics_collected": {
+                  "nvidia_gpu": {
+                    "measurement": [
+                      "utilization_gpu",
+                      "utilization_memory",
+                      "memory_used",
+                      "temperature_gpu"
+                    ],
+                    "metrics_collection_interval": 60
+                  }
+                }
+              }
+            }
+            EOF
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config \
+              -m ec2 \
+              -s \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json
+
+  GpuAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub customer-ops-${Environment}-gpu
+      MinSize: "0"
+      DesiredCapacity: "0"
+      MaxSize: "1"
+      NewInstancesProtectedFromScaleIn: true
+      HealthCheckType: EC2
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref GpuLaunchTemplate
+        Version: !GetAtt GpuLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-gpu
+          PropagateAtLaunch: true
+        - Key: AmazonECSManaged
+          Value: "true"
+          PropagateAtLaunch: true
+
+  GpuCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Sub customer-ops-${Environment}-gpu
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref GpuAutoScalingGroup
+        ManagedDraining: ENABLED
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 1
+          InstanceWarmupPeriod: 300
+        ManagedTerminationProtection: ENABLED
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-gpu
+
   ClusterCapacityProviderAssociations:
     Type: AWS::ECS::ClusterCapacityProviderAssociations
     Properties:
@@ -357,6 +496,7 @@ Resources:
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
+        - !Ref GpuCapacityProvider
       DefaultCapacityProviderStrategy:
         - CapacityProvider: FARGATE
           Weight: 1
@@ -471,6 +611,12 @@ Outputs:
     Value: !Ref EcsCluster
     Export:
       Name: !Sub customer-ops-${Environment}-cluster
+  GpuCapacityProviderName:
+    Value: !Ref GpuCapacityProvider
+    Export:
+      Name: !Sub customer-ops-${Environment}-gpu-capacity-provider
+  GpuAutoScalingGroupName:
+    Value: !Ref GpuAutoScalingGroup
   ModelApiRepositoryUri:
     Value: !GetAtt ModelApiRepository.RepositoryUri
   ModelApiRepositoryName:

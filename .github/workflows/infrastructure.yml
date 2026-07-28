@@ -13,6 +13,14 @@ on:
         description: Type UPDATE to update AWS infrastructure
         required: true
         type: string
+      model_server_compute:
+        description: Model server compute (GPU_EC2 is the production target; FARGATE is rollback)
+        required: true
+        default: GPU_EC2
+        type: choice
+        options:
+          - GPU_EC2
+          - FARGATE
 
 concurrency:
   group: infrastructure-production
@@ -51,6 +59,8 @@ jobs:
           grep -q 'customer-ops-${Environment}-operations' infra/cloudformation/runtime.yml
           grep -q 'syn-nodejs-puppeteer-17.0' infra/cloudformation/runtime.yml
           grep -q 'FunctionResponseTypes: \[ReportBatchItemFailures\]' infra/cloudformation/runtime.yml
+          grep -q 'ECS_ENABLE_GPU_SUPPORT=true' infra/cloudformation/foundation.yml
+          grep -q 'Type: GPU' infra/cloudformation/runtime.yml
 
   update:
     name: Update production infrastructure
@@ -75,6 +85,33 @@ jobs:
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verify GPU quota and regional offering
+        if: inputs.model_server_compute == 'GPU_EC2'
+        run: |
+          quota="$(
+            aws service-quotas get-service-quota \
+              --service-code ec2 \
+              --quota-code L-DB2E81BA \
+              --query 'Quota.Value' \
+              --output text
+          )"
+          if ! awk -v quota="${quota}" 'BEGIN { exit !(quota >= 4) }'; then
+            echo "::error::The regional 'Running On-Demand G and VT instances' quota is ${quota} vCPU; g4dn.xlarge requires at least 4. Request a quota increase before this workflow."
+            exit 1
+          fi
+          offerings="$(
+            aws ec2 describe-instance-type-offerings \
+              --location-type availability-zone \
+              --filters Name=instance-type,Values=g4dn.xlarge \
+              --query 'InstanceTypeOfferings[].Location' \
+              --output text
+          )"
+          if [ -z "${offerings}" ] || [ "${offerings}" = "None" ]; then
+            echo "::error::g4dn.xlarge is not offered in any Availability Zone in ${AWS_REGION}."
+            exit 1
+          fi
+          echo "GPU quota: ${quota} vCPU; offerings: ${offerings}"
+
       - name: Require existing production stacks
         run: |
           aws cloudformation describe-stacks --stack-name "${FOUNDATION_STACK}" >/dev/null
@@ -95,18 +132,64 @@ jobs:
               --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" \
               --output text
           }
-          artifact_bucket="$(
+          output() {
+            local stack_name="$1"
+            local output_key="$2"
             aws cloudformation describe-stacks \
-              --stack-name "${FOUNDATION_STACK}" \
-              --query "Stacks[0].Outputs[?OutputKey=='DeploymentBucketName'].OutputValue" \
+              --stack-name "${stack_name}" \
+              --query "Stacks[0].Outputs[?OutputKey=='${output_key}'].OutputValue" \
+              --output text
+          }
+          active_service_task_definition() {
+            local service_name="$1"
+            local cluster_name="$2"
+            aws ecs describe-services \
+              --cluster "${cluster_name}" \
+              --services "${service_name}" \
+              --query 'services[0].taskDefinition' \
+              --output text
+          }
+          task_definition_image() {
+            local task_definition="$1"
+            local container_name="$2"
+            aws ecs describe-task-definition \
+              --task-definition "${task_definition}" \
+              --query "taskDefinition.containerDefinitions[?name=='${container_name}'].image | [0]" \
+              --output text
+          }
+          artifact_bucket="$(
+            output "${FOUNDATION_STACK}" DeploymentBucketName
+          )"
+          ecs_cluster="$(output "${RUNTIME_STACK}" EcsClusterName)"
+          model_api_service="$(output "${RUNTIME_STACK}" ModelApiServiceName)"
+          model_server_service="$(output "${RUNTIME_STACK}" ModelServerServiceName)"
+          model_api_task_definition="$(active_service_task_definition "${model_api_service}" "${ecs_cluster}")"
+          model_server_task_definition="$(active_service_task_definition "${model_server_service}" "${ecs_cluster}")"
+          model_api_image="$(task_definition_image "${model_api_task_definition}" model-api)"
+          model_server_image="$(task_definition_image "${model_server_task_definition}" model-server)"
+          model_server_gpu_layers="$(
+            aws ecs describe-task-definition \
+              --task-definition "${model_server_task_definition}" \
+              --query "taskDefinition.containerDefinitions[?name=='model-server'].environment[?name=='MODEL_GPU_LAYERS'].value | [0][0]" \
               --output text
           )"
+          for value in "${artifact_bucket}" "${ecs_cluster}" "${model_api_image}" "${model_server_image}"; do
+            if [ -z "${value}" ] || [ "${value}" = "None" ]; then
+              echo "::error::Could not resolve the active production artifacts."
+              exit 1
+            fi
+          done
+          if [ "${model_server_gpu_layers}" != "-1" ] && [ "${model_server_gpu_layers}" != "0" ]; then
+            echo "::error::Unexpected MODEL_GPU_LAYERS value: ${model_server_gpu_layers}"
+            exit 1
+          fi
           {
             echo "ARTIFACT_BUCKET=${artifact_bucket}"
             echo "BACKEND_CODE_BUCKET=$(parameter BackendLambdaCodeBucket)"
             echo "BACKEND_CODE_KEY=$(parameter BackendLambdaCodeKey)"
-            echo "MODEL_API_IMAGE=$(parameter ModelApiImageUri)"
-            echo "MODEL_SERVER_IMAGE=$(parameter ModelServerImageUri)"
+            echo "MODEL_API_IMAGE=${model_api_image}"
+            echo "MODEL_SERVER_IMAGE=${model_server_image}"
+            echo "MODEL_SERVER_GPU_LAYERS=${model_server_gpu_layers}"
             echo "MODEL_BUCKET=$(parameter ModelBucketName)"
             echo "MODEL_OBJECT_KEY=$(parameter ModelObjectKey)"
             echo "EMBEDDING_PREFIX=$(parameter EmbeddingModelPrefix)"
@@ -153,6 +236,8 @@ jobs:
               EmbeddingModelPrefix="${EMBEDDING_PREFIX}" \
               RerankModelPrefix="${RERANK_PREFIX}" \
               ModelSha256="${MODEL_SHA256}" \
+              ModelServerComputeType="${{ inputs.model_server_compute }}" \
+              ModelServerGpuLayers="${MODEL_SERVER_GPU_LAYERS}" \
               BackendCanaryPercent=0
 
       - name: Verify infrastructure outputs
@@ -170,6 +255,8 @@ jobs:
             echo "- Existing backend artifact preserved: \`${BACKEND_CODE_KEY}\`"
             echo "- Existing model-api image preserved: \`${MODEL_API_IMAGE}\`"
             echo "- Existing model-server image preserved: \`${MODEL_SERVER_IMAGE}\`"
+            echo "- Model-server compute: \`${{ inputs.model_server_compute }}\`"
+            echo "- Model-server GPU layers preserved: \`${MODEL_SERVER_GPU_LAYERS}\`"
             echo "- API Gateway canary traffic forced to \`0%\`"
             echo "- No frontend deployment was performed"
           } >> "${GITHUB_STEP_SUMMARY}"

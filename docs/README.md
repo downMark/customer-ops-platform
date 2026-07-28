@@ -249,7 +249,7 @@ POST http://127.0.0.1:8000/v1/embeddings
 POST http://127.0.0.1:8000/v1/rerank
 ```
 
-生产环境中 `model-server` 运行在私有 CPU Fargate Service 中，必须配置服务
+生产环境中 `model-server` 运行在私有 GPU EC2 ECS Service 中，必须配置服务
 密钥，不能把未鉴权的模型端口暴露到公网。
 
 ## 8. 部署边界与 GitHub Actions
@@ -261,7 +261,7 @@ POST http://127.0.0.1:8000/v1/rerank
 | `event-worker` | Lambda，由 SQS Event Source Mapping 触发       |
 | SNS/SQS/DLQ    | AWS 托管服务                                  |
 | `model-api`    | ECS Service + 公网 HTTPS ALB，支持 SSE         |
-| `model-server` | 私有 ECS CPU Fargate Service + llama-cpp-python |
+| `model-server` | 私有 ECS GPU EC2 Service + T4 + llama-cpp-python |
 | Synthetics     | CloudWatch Synthetics                         |
 | 基础设施       | CloudFormation                                |
 
@@ -283,8 +283,8 @@ POST http://127.0.0.1:8000/v1/rerank
   Dashboard、Synthetics 和 Event Worker 初始制品；复用现有 Backend/ECS 制品。
 - `.github/workflows/model-api-ecs.yml`：测试并构建 Mastra 容器，推送 ECR，
   将不可变 commit SHA 镜像写入现有 ECS Task Definition 后滚动部署。
-- `.github/workflows/model-server-ecs.yml`：测试并构建 CPU 推理容器，推送
-  ECR，并滚动部署私有 Fargate Service。GGUF 不进入镜像。
+- `.github/workflows/model-server-ecs.yml`：测试并构建 GPU 或回退 CPU
+  推理容器，推送 ECR，并滚动部署私有 ECS Service。GGUF 不进入镜像。
 
 所有工作流都只支持从 Actions 页面通过 `workflow_dispatch` 手动运行；
 Pull Request 和 push 均不会自动执行检查或发布。建议给 GitHub `production`
@@ -331,8 +331,8 @@ Python model-server Environment variables：
 
 | 名称 | 用途 |
 | ---- | ---- |
-| `MODEL_SERVER_ECR_REPOSITORY` | CPU 模型服务 ECR Repository 名 |
-| `MODEL_SERVER_ECS_CLUSTER` | Fargate ECS Cluster 名 |
+| `MODEL_SERVER_ECR_REPOSITORY` | 模型服务 ECR Repository 名 |
+| `MODEL_SERVER_ECS_CLUSTER` | ECS Cluster 名 |
 | `MODEL_SERVER_ECS_SERVICE` | 私有模型 ECS Service 名 |
 | `MODEL_SERVER_ECS_CONTAINER_NAME` | Task Definition 中的容器名 |
 | `MODEL_SERVER_TASK_DEFINITION_FAMILY` | 当前 Task Definition family |
@@ -368,11 +368,11 @@ Mastra ECS          ──TCP 8000──> private Python model-server
 
 - Mastra ALB 的 443 端口面向公网，应用层 CORS 仅允许实际 Cloudflare 域名。
 - Mastra Task 不分配不必要的入站端口；ALB 只转发到其 4111 端口。
-- Python Task 不挂公网 ALB。当前无 NAT 的公共子网为任务分配公网 IP，仅用于
-  拉取 ECR 镜像和 S3 模型；Security Group 的 TCP 8000 入站来源只能是
-  Mastra Task Security Group。
-- Python Task 使用 CPU Fargate，配置 4 vCPU、16 GiB 内存、30 GiB 临时磁盘，
-  `MODEL_GPU_LAYERS=0`，运行时不依赖 CUDA。
+- Python Task 不挂公网 ALB。GPU EC2 容器实例位于当前无 NAT 的公共子网，
+  出站仅用于拉取 ECR 镜像和 S3 模型；Security Group 的 TCP 8000 入站来源
+  只能是 Mastra Task Security Group 和内部 NLB 健康检查。
+- Python Task 使用 `g4dn.xlarge` 的 NVIDIA T4，任务申请一张 GPU，并设置
+  `MODEL_GPU_LAYERS=-1`。Fargate 仅作为显式回退路径。
 - `MODEL_SERVER_API_KEY` 通过 Secrets Manager 同时注入两边，作为网络限制之外
   的第二层认证。
 - Python ECS Task Role 仅允许
@@ -387,7 +387,8 @@ Mastra ECS          ──TCP 8000──> private Python model-server
 
 1. 输入 `UPDATE` 并通过 production Environment reviewer。
 2. 工作流确认 foundation/runtime Stack 已存在。
-3. 读取并复用当前 Backend ZIP key、Model API 镜像和 Model Server 镜像。
+3. 从当前 ECS Service 读取并复用 Model API 和 Model Server 实际运行镜像，
+   同时保留 Backend CloudFormation 制品参数。
 4. 更新 CloudFormation，并上传 Event Worker 制品。
 5. 不发布 Frontend，不滚动 ECS，也不把 Backend candidate 提升为 stable。
 

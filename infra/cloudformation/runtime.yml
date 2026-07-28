@@ -32,11 +32,23 @@ Parameters:
   ModelSha256:
     Type: String
     Default: ""
+  ModelServerComputeType:
+    Type: String
+    Default: GPU_EC2
+    AllowedValues: [GPU_EC2, FARGATE]
+  ModelServerGpuLayers:
+    Type: String
+    Default: "0"
+    AllowedValues: ["-1", "0"]
   BackendCanaryPercent:
     Type: Number
     Default: 0
     MinValue: 0
     MaxValue: 1
+
+Conditions:
+  UseGpuModelServer: !Equals [!Ref ModelServerComputeType, GPU_EC2]
+  UseFargateModelServer: !Equals [!Ref ModelServerComputeType, FARGATE]
 
 Resources:
   BackendLambdaRole:
@@ -528,6 +540,7 @@ Resources:
 
   ModelServerTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: UseFargateModelServer
     Properties:
       Name: !Sub cops-${Environment}-model
       VpcId:
@@ -535,6 +548,24 @@ Resources:
       Port: 8000
       Protocol: TCP
       TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckPort: "8000"
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      HealthCheckIntervalSeconds: 30
+
+  GpuModelServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: UseGpuModelServer
+    Properties:
+      Name: !Sub cops-${Environment}-model-gpu
+      VpcId:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-vpc-id
+      Port: 8000
+      Protocol: TCP
+      TargetType: instance
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
       HealthCheckPath: /health
@@ -551,18 +582,24 @@ Resources:
       Protocol: TCP
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref ModelServerTargetGroup
+          TargetGroupArn: !If
+            - UseGpuModelServer
+            - !Ref GpuModelServerTargetGroup
+            - !Ref ModelServerTargetGroup
 
   ModelServerTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: !Sub customer-ops-${Environment}-model-server
-      RequiresCompatibilities: [FARGATE]
-      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - !If [UseGpuModelServer, EC2, FARGATE]
+      NetworkMode: !If [UseGpuModelServer, bridge, awsvpc]
       Cpu: "4096"
-      Memory: "16384"
-      EphemeralStorage:
-        SizeInGiB: 30
+      Memory: !If [UseGpuModelServer, "14336", "16384"]
+      EphemeralStorage: !If
+        - UseGpuModelServer
+        - !Ref AWS::NoValue
+        - SizeInGiB: 30
       ExecutionRoleArn:
         Fn::ImportValue: !Sub customer-ops-${Environment}-task-execution-role
       TaskRoleArn:
@@ -575,7 +612,13 @@ Resources:
           Essential: true
           PortMappings:
             - ContainerPort: 8000
+              HostPort: 8000
               Protocol: tcp
+          ResourceRequirements: !If
+            - UseGpuModelServer
+            - - Type: GPU
+                Value: "1"
+            - !Ref AWS::NoValue
           MountPoints:
             - SourceVolume: model-cache
               ContainerPath: /models
@@ -614,7 +657,7 @@ Resources:
             - Name: MODEL_PORT
               Value: "8000"
             - Name: MODEL_GPU_LAYERS
-              Value: "0"
+              Value: !If [UseGpuModelServer, !Ref ModelServerGpuLayers, "0"]
             - Name: MODEL_DISABLE_THINKING
               Value: "true"
             - Name: MODEL_THREADS
@@ -635,30 +678,45 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn: ModelServerListener
     Properties:
-      ServiceName: !Sub customer-ops-${Environment}-model-server
+      ServiceName: !If
+        - UseGpuModelServer
+        - !Sub customer-ops-${Environment}-model-server-gpu
+        - !Sub customer-ops-${Environment}-model-server
       Cluster:
         Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
       TaskDefinition: !Ref ModelServerTaskDefinition
       DesiredCount: 1
-      LaunchType: FARGATE
-      PlatformVersion: LATEST
+      LaunchType: !If [UseGpuModelServer, !Ref AWS::NoValue, FARGATE]
+      PlatformVersion: !If [UseGpuModelServer, !Ref AWS::NoValue, LATEST]
+      CapacityProviderStrategy: !If
+        - UseGpuModelServer
+        - - CapacityProvider:
+              Fn::ImportValue: !Sub customer-ops-${Environment}-gpu-capacity-provider
+            Base: 1
+            Weight: 1
+        - !Ref AWS::NoValue
       HealthCheckGracePeriodSeconds: 900
       DeploymentConfiguration:
         MinimumHealthyPercent: 0
         MaximumPercent: 100
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
-          Subnets:
-            Fn::Split:
-              - ","
-              - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
-          SecurityGroups:
-            - Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-sg
+      NetworkConfiguration: !If
+        - UseGpuModelServer
+        - !Ref AWS::NoValue
+        - AwsvpcConfiguration:
+            AssignPublicIp: ENABLED
+            Subnets:
+              Fn::Split:
+                - ","
+                - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
+            SecurityGroups:
+              - Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-sg
       LoadBalancers:
         - ContainerName: model-server
           ContainerPort: 8000
-          TargetGroupArn: !Ref ModelServerTargetGroup
+          TargetGroupArn: !If
+            - UseGpuModelServer
+            - !Ref GpuModelServerTargetGroup
+            - !Ref ModelServerTargetGroup
 
   ModelApiLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -898,8 +956,22 @@ Resources:
               }
             },
             {
+              "type": "metric",
+              "x": 0, "y": 25, "width": 24, "height": 6,
+              "properties": {
+                "title": "Model server NVIDIA T4",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "metrics": [
+                  [{"expression": "SEARCH('{CustomerOps/GPU,InstanceId,index,name,arch} MetricName=\"nvidia_smi_utilization_gpu\"', 'Average', 60)", "label": "GPU utilization (%)", "id": "gpu_util"}],
+                  [{"expression": "SEARCH('{CustomerOps/GPU,InstanceId,index,name,arch} MetricName=\"nvidia_smi_utilization_memory\"', 'Average', 60)", "label": "GPU memory utilization (%)", "id": "gpu_mem"}],
+                  [{"expression": "SEARCH('{CustomerOps/GPU,InstanceId,index,name,arch} MetricName=\"nvidia_smi_temperature_gpu\"', 'Average', 60)", "label": "GPU temperature (C)", "id": "gpu_temp", "yAxis": "right"}]
+                ]
+              }
+            },
+            {
               "type": "alarm",
-              "x": 0, "y": 25, "width": 24, "height": 5,
+              "x": 0, "y": 31, "width": 24, "height": 5,
               "properties": {
                 "title": "Production alarms",
                 "alarms": [
@@ -948,6 +1020,8 @@ Outputs:
     Value: !Sub customer-ops-${Environment}-model-api
   ModelServerTaskDefinitionFamily:
     Value: !Sub customer-ops-${Environment}-model-server
+  ModelServerComputeType:
+    Value: !Ref ModelServerComputeType
   EventWorkerFunctionName:
     Value: !Ref EventWorkerFunction
   ApiHealthCanaryName:

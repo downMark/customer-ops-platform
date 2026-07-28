@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.12-slim-bookworm AS cpu-builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
@@ -22,7 +22,34 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS gpu-builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON=/usr/bin/python3 \
+    CMAKE_ARGS="-DGGML_CUDA=on -DGGML_NATIVE=off -DCMAKE_CUDA_ARCHITECTURES=75" \
+    FORCE_CMAKE=1
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        ninja-build \
+        python3 \
+        python3-dev \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS runtime-base
 
 ARG TARGETARCH
 
@@ -39,6 +66,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         libgomp1 \
+        python3 \
         unzip \
     && case "${TARGETARCH:-amd64}" in \
         amd64) aws_arch=x86_64 ;; \
@@ -54,7 +82,6 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /opt/venv /opt/venv
 COPY app ./app
 COPY scripts/start-container.sh /usr/local/bin/start-model-server
 
@@ -64,3 +91,19 @@ RUN chmod 0555 /usr/local/bin/start-model-server \
 EXPOSE 8000
 
 ENTRYPOINT ["start-model-server"]
+
+FROM runtime-base AS cpu-runtime
+
+COPY --from=cpu-builder /opt/venv /opt/venv
+
+ENV MODEL_GPU_LAYERS=0
+
+FROM runtime-base AS gpu-runtime
+
+COPY --from=gpu-builder /opt/venv /opt/venv
+
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_VISIBLE_DEVICES=all \
+    MODEL_GPU_LAYERS=-1
+
+FROM gpu-runtime AS runtime
