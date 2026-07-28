@@ -193,6 +193,14 @@ jobs:
               exit 1
             fi
           done
+          if [ -z "${model_server_gpu_layers}" ] || [ "${model_server_gpu_layers}" = "None" ]; then
+            if [ "${{ inputs.model_server_compute }}" = "GPU_EC2" ]; then
+              model_server_gpu_layers="-1"
+            else
+              model_server_gpu_layers="0"
+            fi
+            echo "::notice::The active task definition does not set MODEL_GPU_LAYERS; using ${model_server_gpu_layers} for ${{ inputs.model_server_compute }}."
+          fi
           if [ "${model_server_gpu_layers}" != "-1" ] && [ "${model_server_gpu_layers}" != "0" ]; then
             echo "::error::Unexpected MODEL_GPU_LAYERS value: ${model_server_gpu_layers}"
             exit 1
