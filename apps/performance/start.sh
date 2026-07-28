@@ -11,6 +11,7 @@ CONSOLE_LOG="${RUNTIME_DIR}/console.log"
 SENTRY_DIR="${SCRIPT_DIR}/sentry/.runtime/self-hosted"
 SENTRY_INSTALL_MARKER="${SENTRY_DIR}/.customer-ops-install-complete"
 SENTRY_MODE="required"
+MINIMUM_SENTRY_MEMORY_MIB=14000
 
 usage() {
   cat <<'EOF'
@@ -62,6 +63,14 @@ if [ "${SENTRY_MODE}" = "required" ]; then
     echo "Start Docker Desktop, then run ./start.sh again." >&2
     exit 1
   }
+  docker_memory_bytes="$(docker info --format '{{.MemTotal}}')"
+  docker_memory_mib="$((docker_memory_bytes / 1024 / 1024))"
+  if (( docker_memory_mib < MINIMUM_SENTRY_MEMORY_MIB )); then
+    echo "Local Sentry requires at least ${MINIMUM_SENTRY_MEMORY_MIB} MiB of Docker memory; found ${docker_memory_mib} MiB." >&2
+    echo "Docker Desktop > Settings > Resources > Advanced: set Memory to at least 14 GB, then Apply & Restart." >&2
+    echo "Use ./start.sh --console-only if this Mac cannot dedicate that memory to Sentry." >&2
+    exit 1
+  fi
   compose_version="$(docker compose version --short 2>/dev/null || true)"
   if ! node -e '
     const current = process.argv[1].replace(/^v/, "").split(/[.-]/).slice(0, 3).map(Number);

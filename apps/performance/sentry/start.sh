@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SENTRY_DIR="${SCRIPT_DIR}/.runtime/self-hosted"
+export DOCKER_CONFIG="${SENTRY_DOCKER_CONFIG:-${SCRIPT_DIR}/docker-public}"
 if [ ! -f "${SENTRY_DIR}/docker-compose.yml" ]; then
   echo "Run ./install.sh first." >&2
   exit 1

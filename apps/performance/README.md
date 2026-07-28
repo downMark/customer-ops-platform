@@ -24,7 +24,9 @@ Console 与 Sentry 仅绑定 `127.0.0.1`，不加入任何云端发布工作流�
 一键启动本地 Console、Kimi AIOps Agent 和 Sentry。首次运行会自动安装固定版本
 的 Sentry self-hosted，因此需要 Docker Compose 2.32.2 或更高版本，并先启动
 Docker Desktop。首次安装耗时会较长；默认不向 Sentry 上报 self-hosted 安装
-问题：
+问题。Sentry 还要求 Docker 至少分配 14000 MiB 内存；在 Docker Desktop 的
+Settings → Resources → Advanced 中将 Memory 设置为至少 14 GB 并重启。
+如果本机无法提供该内存，可使用 `./start.sh --console-only`：
 
 ```bash
 cd apps/performance
@@ -78,6 +80,11 @@ cd apps/performance/sentry
 安装器固定 Sentry self-hosted 26.5.1 并绑定 `127.0.0.1:9000`。在 Sentry
 创建本地项目后，将其 OTLP traces URL 写入环境变量，再运行 `pnpm sync` 从
 S3 增量同步脱敏 trace。同步 checkpoint 只保存在 `sentry/.runtime/`。
+如果仓库位于 exFAT 等外接 macOS 磁盘，安装器会在构建前自动清理由扩展属性
+生成的 `._*` AppleDouble 文件，避免 Docker BuildKit 的 `failed to xattr`
+错误。Sentry 的公开镜像默认通过项目内无凭证 Docker 配置拉取，避免新版
+Docker Desktop 凭证助手卡住；需要私有镜像凭证时可设置
+`SENTRY_DOCKER_CONFIG` 指向其他 Docker 配置目录。
 
 ## AWS 部署
 
