@@ -4,6 +4,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, V
 use crate::domain::knowledge::{KnowledgeChunk, KnowledgeFilter, KnowledgeRepository};
 use crate::domain::repository::RepoError;
 use crate::infra::error::map_db_err;
+use crate::performance;
 
 pub struct SeaOrmKnowledgeRepository {
     db: DatabaseConnection,
@@ -23,6 +24,7 @@ impl KnowledgeRepository for SeaOrmKnowledgeRepository {
         top_k: u64,
         filter: &KnowledgeFilter,
     ) -> Result<Vec<KnowledgeChunk>, RepoError> {
+        let span = performance::client().start_span("db.knowledge.search", None);
         let vector_text = format!(
             "[{}]",
             vector
@@ -67,7 +69,8 @@ impl KnowledgeRepository for SeaOrmKnowledgeRepository {
             .await
             .map_err(map_db_err)?;
 
-        rows.into_iter()
+        let result = rows
+            .into_iter()
             .map(|row| {
                 let metadata_text: String = row.try_get("", "metadata_text").map_err(map_db_err)?;
                 let metadata = serde_json::from_str(&metadata_text)
@@ -82,6 +85,8 @@ impl KnowledgeRepository for SeaOrmKnowledgeRepository {
                     score: row.try_get("", "score").map_err(map_db_err)?,
                 })
             })
-            .collect()
+            .collect();
+        span.finish("ok");
+        result
     }
 }

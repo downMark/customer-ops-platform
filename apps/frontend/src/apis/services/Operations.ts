@@ -5,6 +5,7 @@ import {
   RecoveryAccepted,
 } from "../model/operations";
 import AuthService from "./Auth";
+import { performanceFetch } from "../../performance";
 
 interface Envelope<T> {
   success: boolean;
@@ -15,7 +16,7 @@ interface Envelope<T> {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = AuthService.getAccessToken();
   if (!token) throw new Error("登录状态已失效，请重新登录。");
-  const response = await fetch(`${getApiBaseURL()}${path}`, {
+  const response = await performanceFetch(`${getApiBaseURL()}${path}`, {
     ...init,
     headers: {
       Accept: "application/json",

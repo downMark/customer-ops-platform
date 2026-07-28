@@ -5,6 +5,9 @@ import { KoaProvider } from "@app/utils/KoaContext";
 import { Context } from "koa";
 import "theme/index.less";
 import "./index.css";
+import { observeWebVitals } from "./performance";
+
+if (typeof window !== "undefined") observeWebVitals();
 
 interface AppProps {
   context?: Context;

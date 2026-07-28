@@ -15,6 +15,8 @@ Parameters:
     Type: String
   ModelServerImageUri:
     Type: String
+  PerformanceCleanerImageUri:
+    Type: String
   ModelBucketName:
     Type: String
     Default: customer-ops-models
@@ -155,6 +157,8 @@ Resources:
             customer-ops-${Environment}-backend-canary-errors,
             customer-ops-${Environment}-backend-api-5xx
           RUST_LOG: info,customer_ops_backend=info
+          APP_ENVIRONMENT: !Ref Environment
+          APP_RELEASE: !Ref BackendLambdaCodeKey
 
   EventWorkerLogGroup:
     Type: AWS::Logs::LogGroup
@@ -214,6 +218,8 @@ Resources:
           OPERATIONS_TABLE_NAME:
             Fn::ImportValue: !Sub customer-ops-${Environment}-failure-drills-table
           RUST_LOG: info,customer_ops_event_worker=info
+          APP_ENVIRONMENT: !Ref Environment
+          APP_RELEASE: !Ref EventWorkerLambdaCodeKey
 
   QualityQueueEventSource:
     Type: AWS::Lambda::EventSourceMapping
@@ -662,6 +668,10 @@ Resources:
               Value: "true"
             - Name: MODEL_THREADS
               Value: "4"
+            - Name: APP_ENVIRONMENT
+              Value: !Ref Environment
+            - Name: APP_RELEASE
+              Value: !Ref ModelServerImageUri
           Secrets:
             - Name: MODEL_SERVER_API_KEY
               ValueFrom:
@@ -686,8 +696,8 @@ Resources:
         Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
       TaskDefinition: !Ref ModelServerTaskDefinition
       DesiredCount: 1
-      LaunchType: !If [UseGpuModelServer, !Ref AWS::NoValue, FARGATE]
-      PlatformVersion: !If [UseGpuModelServer, !Ref AWS::NoValue, LATEST]
+      LaunchType: !If [UseGpuModelServer, !Ref "AWS::NoValue", FARGATE]
+      PlatformVersion: !If [UseGpuModelServer, !Ref "AWS::NoValue", LATEST]
       CapacityProviderStrategy: !If
         - UseGpuModelServer
         - - CapacityProvider:
@@ -815,6 +825,10 @@ Resources:
               Value: "8000"
             - Name: RAG_MAX_CONTEXT_CHARS
               Value: "6000"
+            - Name: APP_ENVIRONMENT
+              Value: !Ref Environment
+            - Name: APP_RELEASE
+              Value: !Ref ModelApiImageUri
           Secrets:
             - Name: MODEL_SERVER_API_KEY
               ValueFrom:
@@ -857,6 +871,232 @@ Resources:
         - ContainerName: model-api
           ContainerPort: 4111
           TargetGroupArn: !Ref ModelApiTargetGroup
+
+  PerformanceCleanerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub customer-ops-${Environment}-performance-cleaner
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-task-execution-role
+      TaskRoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-cleaner-task-role
+      ContainerDefinitions:
+        - Name: performance-cleaner
+          Image: !Ref PerformanceCleanerImageUri
+          Essential: true
+          Environment:
+            - Name: PERFORMANCE_STREAM_NAME
+              Value:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-performance-stream-name
+            - Name: PERFORMANCE_STATE_TABLE
+              Value:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-performance-state-table
+            - Name: PERFORMANCE_AGGREGATE_TABLE
+              Value:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-performance-aggregate-table
+            - Name: PERFORMANCE_DETAIL_BUCKET
+              Value:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-performance-detail-bucket
+            - Name: PERFORMANCE_RETENTION_DAYS
+              Value: "30"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group:
+                Fn::ImportValue: !Sub customer-ops-${Environment}-performance-cleaner-log-group
+              awslogs-stream-prefix: ecs
+
+  PerformanceCleanerService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub customer-ops-${Environment}-performance-cleaner
+      Cluster:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
+      TaskDefinition: !Ref PerformanceCleanerTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            Fn::Split:
+              - ","
+              - Fn::ImportValue: !Sub customer-ops-${Environment}-public-subnets
+          SecurityGroups:
+            - Fn::ImportValue: !Sub customer-ops-${Environment}-performance-cleaner-sg
+
+  ModelApiPerformanceSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-model-api-log-group
+      FilterName: performance-events
+      FilterPattern: '{$.schema = "customer-ops.performance.v1"}'
+      DestinationArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-stream-arn
+      RoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-logs-role
+      Distribution: Random
+
+  ModelServerPerformanceSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-log-group
+      FilterName: performance-events
+      FilterPattern: '{$.schema = "customer-ops.performance.v1"}'
+      DestinationArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-stream-arn
+      RoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-logs-role
+      Distribution: Random
+
+  BackendPerformanceSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Sub /aws/lambda/customer-ops-${Environment}-backend
+      FilterName: performance-events
+      FilterPattern: '{$.schema = "customer-ops.performance.v1"}'
+      DestinationArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-stream-arn
+      RoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-logs-role
+      Distribution: Random
+
+  EventWorkerPerformanceSubscription:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn: EventWorkerLogGroup
+    Properties:
+      LogGroupName: !Ref EventWorkerLogGroup
+      FilterName: performance-events
+      FilterPattern: '{$.schema = "customer-ops.performance.v1"}'
+      DestinationArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-stream-arn
+      RoleArn:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-logs-role
+      Distribution: Random
+
+  PerformanceCleanerErrorMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-cleaner-log-group
+      FilterPattern: '"cleaner stopped"'
+      MetricTransformations:
+        - MetricNamespace: CustomerOps/Performance
+          MetricName: CleanerErrors
+          MetricValue: "1"
+
+  PerformanceInvalidEventMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub customer-ops-${Environment}-performance-cleaner-log-group
+      FilterPattern: '"invalid performance events dropped"'
+      MetricTransformations:
+        - MetricNamespace: CustomerOps/Performance
+          MetricName: InvalidEventBatches
+          MetricValue: "1"
+
+  PerformanceStreamDelayAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-performance-stream-delay
+      Namespace: AWS/Kinesis
+      MetricName: GetRecords.IteratorAgeMilliseconds
+      Dimensions:
+        - Name: StreamName
+          Value:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-performance-stream-name
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 180000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  PerformanceCleanerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-performance-cleaner-errors
+      Namespace: CustomerOps/Performance
+      MetricName: CleanerErrors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  PerformanceInvalidEventAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-performance-invalid-events
+      Namespace: CustomerOps/Performance
+      MetricName: InvalidEventBatches
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  PerformanceCleanerTaskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-performance-cleaner-task
+      Namespace: ECS/ContainerInsights
+      MetricName: RunningTaskCount
+      Dimensions:
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-cluster
+        - Name: ServiceName
+          Value: !GetAtt PerformanceCleanerService.Name
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
+
+  PerformanceAggregateThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub customer-ops-${Environment}-performance-dynamodb-throttles
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value:
+            Fn::ImportValue: !Sub customer-ops-${Environment}-performance-aggregate-table
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub customer-ops-${Environment}-operations-alerts-topic
 
   OperationsDashboard:
     Type: AWS::CloudWatch::Dashboard
@@ -1020,6 +1260,10 @@ Outputs:
     Value: !Sub customer-ops-${Environment}-model-api
   ModelServerTaskDefinitionFamily:
     Value: !Sub customer-ops-${Environment}-model-server
+  PerformanceCleanerServiceName:
+    Value: !GetAtt PerformanceCleanerService.Name
+  PerformanceCleanerTaskDefinitionFamily:
+    Value: !Sub customer-ops-${Environment}-performance-cleaner
   ModelServerComputeType:
     Value: !Ref ModelServerComputeType
   EventWorkerFunctionName:

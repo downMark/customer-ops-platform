@@ -1,0 +1,13 @@
+{
+  "name": "customer-ops-performance-sentry-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "sync": "node sync.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.850.0"
+  }
+}

@@ -17,9 +17,9 @@ RUN apt-get update \
 
 COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
 
-WORKDIR /app
+WORKDIR /workspace/model-server
 
-COPY pyproject.toml uv.lock ./
+COPY apps/model-server/pyproject.toml apps/model-server/uv.lock ./
 RUN uv sync --frozen --no-dev
 
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS gpu-builder
@@ -44,9 +44,9 @@ RUN apt-get update \
 
 COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
 
-WORKDIR /app
+WORKDIR /workspace/model-server
 
-COPY pyproject.toml uv.lock ./
+COPY apps/model-server/pyproject.toml apps/model-server/uv.lock ./
 RUN uv sync --frozen --no-dev
 
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS runtime-base
@@ -55,6 +55,7 @@ ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH \
+    PYTHONPATH=/app/performance-sdk \
     MODEL_HOST=0.0.0.0 \
     MODEL_PORT=8000 \
     MODEL_PATH=/models/customer-ops-q4_k_m.gguf \
@@ -82,8 +83,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY app ./app
-COPY scripts/start-container.sh /usr/local/bin/start-model-server
+COPY apps/model-server/app ./app
+COPY apps/performance/sdk/python/src /app/performance-sdk
+COPY apps/model-server/scripts/start-container.sh /usr/local/bin/start-model-server
 
 RUN chmod 0555 /usr/local/bin/start-model-server \
     && mkdir -p /models

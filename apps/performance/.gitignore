@@ -1,0 +1,10 @@
+._*
+**/._*
+**/node_modules/
+**/dist/
+**/dist-server/
+**/target/
+**/.pytest_cache/
+**/__pycache__/
+**/*.pyc
+**/.runtime/

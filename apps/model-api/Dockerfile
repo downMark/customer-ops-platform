@@ -2,17 +2,19 @@ FROM node:22-bookworm-slim AS builder
 
 ENV MASTRA_TELEMETRY_DISABLED=1
 
-WORKDIR /app
+WORKDIR /app/model-api
 
 RUN corepack enable
 
-COPY package.json pnpm-lock.yaml ./
+COPY apps/model-api/package.json apps/model-api/pnpm-lock.yaml ./
+COPY apps/performance/sdk/typescript/package.json /app/performance/sdk/typescript/package.json
+COPY apps/performance/sdk/typescript/src /app/performance/sdk/typescript/src
 RUN pnpm install --frozen-lockfile
 
-COPY tsconfig.json vitest.config.ts ./
-COPY src ./src
-COPY scripts ./scripts
-COPY tests ./tests
+COPY apps/model-api/tsconfig.json apps/model-api/vitest.config.ts ./
+COPY apps/model-api/src ./src
+COPY apps/model-api/scripts ./scripts
+COPY apps/model-api/tests ./tests
 
 RUN pnpm typecheck \
     && pnpm test \
@@ -26,7 +28,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-COPY --from=builder /app/.mastra/output ./
+COPY --from=builder /app/model-api/.mastra/output ./
 
 USER node
 

@@ -71,6 +71,7 @@ describe("retrieveKnowledge", () => {
       ["检查冰箱电源", "检查显示器信号线", "检查电视背光和输入源"],
       3,
       expect.any(AbortSignal),
+      expect.stringMatching(/^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$/),
     );
   });
 

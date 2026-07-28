@@ -41,8 +41,13 @@ pub fn build_router_with_cors(
             header::CONTENT_TYPE,
             header::ACCEPT,
             header::HeaderName::from_static("x-trace-id"),
+            header::HeaderName::from_static("traceparent"),
+            header::HeaderName::from_static("tracestate"),
         ])
-        .expose_headers([header::HeaderName::from_static("x-trace-id")]);
+        .expose_headers([
+            header::HeaderName::from_static("x-trace-id"),
+            header::HeaderName::from_static("traceparent"),
+        ]);
 
     Ok(build_base_router(state).layer(cors))
 }
@@ -50,6 +55,7 @@ pub fn build_router_with_cors(
 fn build_base_router(state: AppState) -> Router {
     Router::new()
         .route("/api/auth/login", post(handler::auth::login))
+        .route("/api/auth/validate", get(handler::auth::validate))
         .route(
             "/api/products",
             get(handler::products::list).post(handler::products::create),
@@ -525,6 +531,33 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("trace_"));
+    }
+
+    #[tokio::test]
+    async fn auth_validate_requires_a_valid_token() {
+        let valid = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/validate")
+                    .header("authorization", "Bearer valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), StatusCode::NO_CONTENT);
+
+        let invalid = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/validate")
+                    .header("authorization", "Bearer invalid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

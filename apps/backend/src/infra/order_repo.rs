@@ -11,6 +11,7 @@ use crate::domain::order::{NewOrder, Order, OrderFilter, OrderItem};
 use crate::domain::repository::{OrderRepository, RepoError};
 use crate::infra::entity::{order_items, orders};
 use crate::infra::error::map_db_err;
+use crate::performance;
 
 pub struct SeaOrmOrderRepository {
     db: DatabaseConnection,
@@ -55,22 +56,30 @@ impl SeaOrmOrderRepository {
 #[async_trait]
 impl OrderRepository for SeaOrmOrderRepository {
     async fn find_owned(&self, order_id: &str, user_id: &str) -> Result<Option<Order>, RepoError> {
+        let span = performance::client().start_span("db.order.find", None);
         let model = orders::Entity::find()
             .filter(orders::Column::OrderId.eq(order_id))
             .filter(orders::Column::UserId.eq(user_id))
             .one(&self.db)
             .await
             .map_err(map_db_err)?;
-        let Some(model) = model else { return Ok(None) };
-        Ok(self.attach_items(vec![Order::from(model)]).await?.pop())
+        let Some(model) = model else {
+            span.finish("ok");
+            return Ok(None);
+        };
+        let result = Ok(self.attach_items(vec![Order::from(model)]).await?.pop());
+        span.finish("ok");
+        result
     }
 
     async fn exists(&self, order_id: &str) -> Result<bool, RepoError> {
+        let span = performance::client().start_span("db.order.exists", None);
         let count = orders::Entity::find()
             .filter(orders::Column::OrderId.eq(order_id))
             .count(&self.db)
             .await
             .map_err(map_db_err)?;
+        span.finish("ok");
         Ok(count > 0)
     }
 
@@ -81,6 +90,7 @@ impl OrderRepository for SeaOrmOrderRepository {
         offset: u64,
         limit: u64,
     ) -> Result<(Vec<Order>, u64), RepoError> {
+        let span = performance::client().start_span("db.order.list", None);
         let mut query =
             orders::Entity::find().filter(orders::Column::UserId.eq(user_id.to_string()));
 
@@ -104,10 +114,13 @@ impl OrderRepository for SeaOrmOrderRepository {
         let orders = self
             .attach_items(models.into_iter().map(Order::from).collect())
             .await?;
-        Ok((orders, total))
+        let result = Ok((orders, total));
+        span.finish("ok");
+        result
     }
 
     async fn create_owned(&self, user_id: &str, order: &NewOrder) -> Result<bool, RepoError> {
+        let span = performance::client().start_span("db.order.create", None);
         let txn = self.db.begin().await.map_err(map_db_err)?;
         let result = txn
             .execute(Statement::from_sql_and_values(
@@ -131,6 +144,7 @@ impl OrderRepository for SeaOrmOrderRepository {
             .map_err(map_db_err)?;
         if result.rows_affected() != 1 {
             txn.rollback().await.map_err(map_db_err)?;
+            span.finish("ok");
             return Ok(false);
         }
         for item in &order.items {
@@ -161,6 +175,7 @@ impl OrderRepository for SeaOrmOrderRepository {
                 [order.order_id.clone().into(),item.product_id.clone().into(),name.into(),price.into(),item.quantity.into()])).await.map_err(map_db_err)?;
         }
         txn.commit().await.map_err(map_db_err)?;
+        span.finish("ok");
         Ok(true)
     }
 }

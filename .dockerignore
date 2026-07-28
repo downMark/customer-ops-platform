@@ -1,0 +1,9 @@
+.git
+**/._*
+**/node_modules/
+**/dist/
+**/dist-server/
+**/target/
+**/.venv/
+**/.pytest_cache/
+**/__pycache__/

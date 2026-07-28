@@ -37,10 +37,18 @@ env:
 
 jobs:
   validate:
-    name: Validate templates and event worker
+    name: Validate templates and telemetry services
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/performance/cleaner/pnpm-lock.yaml
       - uses: moonrepo/setup-rust@v1
         with:
           channel: 1.94.1
@@ -54,6 +62,12 @@ jobs:
       - name: Event worker tests
         working-directory: apps/event-worker
         run: cargo test
+      - name: Cleaner build and tests
+        working-directory: apps/performance/cleaner
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm test
       - name: Check production-only template defaults
         run: |
           grep -q 'customer-ops-${Environment}-operations' infra/cloudformation/runtime.yml
@@ -217,6 +231,25 @@ jobs:
             --no-fail-on-empty-changeset \
             --parameter-overrides Environment=production
 
+      - name: Build and publish performance cleaner
+        run: |
+          repository="$(
+            aws cloudformation describe-stacks \
+              --stack-name "${FOUNDATION_STACK}" \
+              --query "Stacks[0].Outputs[?OutputKey=='PerformanceCleanerRepositoryName'].OutputValue" \
+              --output text
+          )"
+          registry="${AWS_ACCOUNT_ID:-$(
+            aws sts get-caller-identity --query Account --output text
+          )}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password |
+            docker login --username AWS --password-stdin "${registry}"
+          docker build \
+            --tag "${registry}/${repository}:${GITHUB_SHA}" \
+            apps/performance/cleaner
+          docker push "${registry}/${repository}:${GITHUB_SHA}"
+          echo "PERFORMANCE_CLEANER_IMAGE=${registry}/${repository}:${GITHUB_SHA}" >> "${GITHUB_ENV}"
+
       - name: Update runtime while preserving application artifacts
         run: |
           aws cloudformation deploy \
@@ -231,6 +264,7 @@ jobs:
               EventWorkerLambdaCodeKey="${EVENT_WORKER_CODE_KEY}" \
               ModelApiImageUri="${MODEL_API_IMAGE}" \
               ModelServerImageUri="${MODEL_SERVER_IMAGE}" \
+              PerformanceCleanerImageUri="${PERFORMANCE_CLEANER_IMAGE}" \
               ModelBucketName="${MODEL_BUCKET}" \
               ModelObjectKey="${MODEL_OBJECT_KEY}" \
               EmbeddingModelPrefix="${EMBEDDING_PREFIX}" \

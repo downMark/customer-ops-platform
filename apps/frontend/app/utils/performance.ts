@@ -18,7 +18,8 @@ export class PerformanceMonitor {
   }
 
   markRenderComplete() {
-    this.metrics.renderTime = Date.now() - this.startTime;
+    this.metrics.renderTime =
+      Date.now() - this.startTime - (this.metrics.prefetchTime || 0);
   }
 
   finish(): PerformanceMetrics {
@@ -43,9 +44,23 @@ export class PerformanceMonitor {
         heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB`,
       },
     });
+    ssrPerformance.recordMetric("ssr.render", {
+      prefetchMs: result.prefetchTime,
+      renderMs: result.renderTime,
+      totalMs: result.totalTime,
+      rssBytes: memoryUsage.rss,
+    }, { component: "react-ssr" });
 
     return result;
   }
 }
 
-export const createPerformanceMonitor = () => new PerformanceMonitor(); 
+export const createPerformanceMonitor = () => new PerformanceMonitor();
+import { PerformanceClient } from "@customer-ops/performance";
+
+const ssrPerformance = new PerformanceClient({
+  service: "frontend-ssr",
+  environment: process.env.APP_ENVIRONMENT || "local",
+  release: process.env.APP_RELEASE || "development",
+  sampleRate: 0.1,
+});

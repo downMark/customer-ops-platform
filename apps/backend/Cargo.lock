@@ -1196,6 +1196,7 @@ dependencies = [
  "aws-smithy-types",
  "axum",
  "chrono",
+ "customer-ops-performance",
  "dotenvy",
  "http-body-util",
  "jsonwebtoken",
@@ -1210,6 +1211,16 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "customer-ops-performance"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

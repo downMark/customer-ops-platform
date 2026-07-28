@@ -2,10 +2,12 @@
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
 use crate::application::login::{LoginCommand, LoginView};
+use crate::domain::auth::AuthUser;
 use crate::response::{ApiResponse, AppError};
 use crate::state::AppState;
 
@@ -13,6 +15,10 @@ use crate::state::AppState;
 pub struct LoginRequest {
     username: String,
     password: String,
+}
+
+pub async fn validate(_user: AuthUser) -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 pub async fn login(

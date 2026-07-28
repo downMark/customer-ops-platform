@@ -2,6 +2,11 @@ import { z } from "zod";
 
 import { config } from "../config";
 import { withTimeout } from "../lib/signals";
+import {
+  performanceClient,
+  requestTraceContext,
+} from "../performance";
+import { formatTraceparent } from "../performance-sdk";
 
 const embeddingResponseSchema = z.object({
   data: z.array(
@@ -46,7 +51,7 @@ export class ModelServerClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal, traceparent?: string): Promise<number[]> {
     const payload = await this.post(
       "/embeddings",
       {
@@ -54,6 +59,7 @@ export class ModelServerClient {
         input: text,
       },
       signal,
+      traceparent,
     );
     const parsed = embeddingResponseSchema.safeParse(payload);
     if (!parsed.success || parsed.data.data.length !== 1) {
@@ -69,6 +75,7 @@ export class ModelServerClient {
     documents: string[],
     topN: number,
     signal?: AbortSignal,
+    traceparent?: string,
   ): Promise<Array<{ index: number; score: number }>> {
     const payload = await this.post(
       "/rerank",
@@ -79,6 +86,7 @@ export class ModelServerClient {
         top_n: topN,
       },
       signal,
+      traceparent,
     );
     const parsed = rerankResponseSchema.safeParse(payload);
     if (!parsed.success) {
@@ -101,21 +109,42 @@ export class ModelServerClient {
     path: string,
     body: unknown,
     signal?: AbortSignal,
+    traceparent?: string,
   ): Promise<unknown> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${this.apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: withTimeout(this.timeoutMs, signal),
+    const operation = path === "/embeddings"
+      ? "model.embedding" : path === "/rerank" ? "model.rerank" : "model.request";
+    const span = performanceClient.startSpan(operation, {
+      parent: requestTraceContext(traceparent),
+      attributes: { endpoint: `/v1${path}`, httpMethod: "POST" },
     });
-    if (!response.ok) {
-      throw new Error(`model-server request failed with ${response.status}`);
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json",
+          traceparent: formatTraceparent(span.context),
+        },
+        body: JSON.stringify(body),
+        signal: withTimeout(this.timeoutMs, signal),
+      });
+      span.finish(response.ok ? "ok" : "error", {
+        ...(Array.isArray((body as { input?: unknown }).input)
+          ? { batchSize: (body as { input: unknown[] }).input.length } : {}),
+        ...(Array.isArray((body as { documents?: unknown }).documents)
+          ? { batchSize: (body as { documents: unknown[] }).documents.length } : {}),
+      });
+      if (!response.ok) {
+        throw new Error(`model-server request failed with ${response.status}`);
+      }
+      return response.json();
+    } catch (error) {
+      span.finish(error instanceof Error && error.name === "AbortError"
+        ? "cancelled" : "error");
+      performanceClient.captureError(operation, error, span.context);
+      throw error;
     }
-    return response.json();
   }
 }
 

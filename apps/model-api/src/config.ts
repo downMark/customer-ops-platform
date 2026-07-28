@@ -27,6 +27,8 @@ const envSchema = z.object({
   CORS_ORIGINS: z
     .string()
     .default("http://localhost:3002"),
+  APP_ENVIRONMENT: z.string().min(1).default("local"),
+  APP_RELEASE: z.string().min(1).default("development"),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -57,4 +59,6 @@ export const config = {
   corsOrigins: parsed.data.CORS_ORIGINS.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean),
+  environment: parsed.data.APP_ENVIRONMENT,
+  release: parsed.data.APP_RELEASE,
 };

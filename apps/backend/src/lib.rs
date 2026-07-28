@@ -8,6 +8,7 @@ pub mod domain;
 mod handler;
 mod infra;
 mod migration;
+mod performance;
 pub mod response;
 pub mod router;
 mod runtime;

@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://customer-ops.local/schemas/performance-event-v1.schema.json",
+  "title": "PerformanceEventV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "eventId",
+    "occurredAt",
+    "service",
+    "environment",
+    "release",
+    "eventType",
+    "operation",
+    "status",
+    "traceId",
+    "spanId",
+    "parentSpanId",
+    "sampled",
+    "measurements",
+    "attributes"
+  ],
+  "properties": {
+    "schema": { "const": "customer-ops.performance.v1" },
+    "eventId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "service": {
+      "enum": [
+        "browser",
+        "frontend-ssr",
+        "model-api",
+        "backend",
+        "event-worker",
+        "model-server",
+        "performance-cleaner"
+      ]
+    },
+    "environment": { "type": "string", "pattern": "^[a-z0-9_-]{1,32}$" },
+    "release": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "eventType": { "enum": ["span", "metric", "error"] },
+    "operation": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+    },
+    "status": {
+      "enum": ["ok", "error", "timeout", "cancelled", "unknown"]
+    },
+    "traceId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "spanId": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+    "parentSpanId": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "durationMs": { "type": "number", "minimum": 0, "maximum": 86400000 },
+    "sampled": { "type": "boolean" },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "number" },
+        "queueMs": { "type": "number", "minimum": 0 },
+        "ttftMs": { "type": "number", "minimum": 0 },
+        "tokensPerSecond": { "type": "number", "minimum": 0 },
+        "inputTokens": { "type": "number", "minimum": 0 },
+        "outputTokens": { "type": "number", "minimum": 0 },
+        "batchSize": { "type": "number", "minimum": 0 },
+        "gpuUtilizationPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "gpuMemoryUsedBytes": { "type": "number", "minimum": 0 },
+        "gpuMemoryTotalBytes": { "type": "number", "minimum": 0 },
+        "gpuTemperatureCelsius": { "type": "number" },
+        "gpuPowerWatts": { "type": "number", "minimum": 0 },
+        "cpuPercent": { "type": "number", "minimum": 0 },
+        "rssBytes": { "type": "number", "minimum": 0 },
+        "lcpMs": { "type": "number", "minimum": 0 },
+        "inpMs": { "type": "number", "minimum": 0 },
+        "cls": { "type": "number", "minimum": 0 },
+        "ttfbMs": { "type": "number", "minimum": 0 },
+        "prefetchMs": { "type": "number", "minimum": 0 },
+        "renderMs": { "type": "number", "minimum": 0 },
+        "totalMs": { "type": "number", "minimum": 0 }
+      }
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "component": { "type": "string", "maxLength": 64 },
+        "endpoint": { "type": "string", "maxLength": 96 },
+        "httpMethod": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] },
+        "httpStatusCode": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "model": { "type": "string", "maxLength": 96 },
+        "finishReason": { "type": "string", "maxLength": 32 },
+        "errorType": { "type": "string", "maxLength": 96 },
+        "errorCode": { "type": "string", "maxLength": 64 },
+        "errorFingerprint": { "type": "string", "maxLength": 64 },
+        "route": { "type": "string", "maxLength": 96 },
+        "runtime": { "type": "string", "maxLength": 64 },
+        "gpuName": { "type": "string", "maxLength": 96 }
+      }
+    }
+  }
+}

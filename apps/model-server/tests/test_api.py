@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+import sys
 from threading import Lock
+import time
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -11,6 +13,7 @@ from app.engine import _format_chatml_without_thinking
 from app.main import create_app
 from app.schemas import ChatCompletionRequest
 from app.settings import Settings
+from app.telemetry import GpuSampler, TimedInferenceLock
 
 
 class FakeEngine:
@@ -50,6 +53,11 @@ class FakeRerankEngine:
     def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
         del query
         return [(index, 0.9 - index * 0.1) for index, _ in enumerate(documents)]
+
+
+class FailingEngine(FakeEngine):
+    def complete(self, request: ChatCompletionRequest) -> dict[str, Any]:
+        raise RuntimeError("fake inference failure")
 
 
 def settings() -> Settings:
@@ -193,3 +201,43 @@ def test_retrieval_limits_are_validated() -> None:
             json={"model": "bge-m3", "input": ["x"] * 33},
         )
         assert response.status_code == 422
+
+
+def test_fake_engine_failure_isolated_as_server_error() -> None:
+    failing = create_app(
+        settings(),
+        lambda _settings, _lock: FailingEngine(),
+        lambda _settings, _lock: FakeEmbeddingEngine(),
+        lambda _settings, _lock: FakeRerankEngine(),
+    )
+    with TestClient(failing, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer test-key",
+                "traceparent": f"00-{'a' * 32}-{'b' * 16}-01",
+            },
+            json={
+                "model": "customer-ops",
+                "stream": False,
+                "messages": [{"role": "user", "content": "test"}],
+            },
+        )
+        assert response.status_code == 500
+
+
+def test_lock_and_gpu_sampler_degrade_without_gpu(monkeypatch: Any) -> None:
+    lock = TimedInferenceLock()
+    assert lock.acquire(blocking=False)
+    assert not lock.acquire(blocking=False)
+    lock.release()
+
+    class MissingNvml:
+        def nvmlInit(self) -> None:
+            raise RuntimeError("no GPU")
+
+    monkeypatch.setitem(sys.modules, "pynvml", MissingNvml())
+    sampler = GpuSampler(interval_seconds=0.01)
+    sampler.start()
+    time.sleep(0.02)
+    sampler.close()

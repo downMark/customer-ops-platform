@@ -1,6 +1,7 @@
 import { getApiBaseURL } from "../index";
 import { CreateProductInput, Product, ProductPage } from "../model/product";
 import AuthService from "./Auth";
+import { performanceFetch } from "../../performance";
 
 interface Envelope<T> {
   success: boolean;
@@ -12,7 +13,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = AuthService.getAccessToken();
   if (!token) throw new Error("登录状态已失效，请重新登录。");
 
-  const response = await fetch(`${getApiBaseURL()}${path}`, {
+  const response = await performanceFetch(`${getApiBaseURL()}${path}`, {
     ...init,
     headers: {
       Accept: "application/json",

@@ -18,6 +18,7 @@ export type GetOrderInput = {
   orderId: string;
   authorization: string;
   traceId: string;
+  traceparent?: string;
   signal?: AbortSignal;
 };
 
@@ -27,6 +28,7 @@ export type SearchKnowledgeInput = {
   filters?: KnowledgeFilters;
   authorization: string;
   traceId: string;
+  traceparent?: string;
   signal?: AbortSignal;
 };
 
@@ -58,6 +60,7 @@ export class BackendClient {
           accept: "application/json",
           authorization: input.authorization,
           "x-trace-id": input.traceId,
+          ...(input.traceparent ? { traceparent: input.traceparent } : {}),
         },
         signal: withTimeout(this.timeoutMs, input.signal),
       });
@@ -168,6 +171,22 @@ export class BackendClient {
     return parsed.data.data;
   }
 
+  async validateAuth(authorization: string, signal?: AbortSignal): Promise<boolean> {
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/api/auth/validate`, {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+          authorization,
+        },
+        signal: withTimeout(this.timeoutMs, signal),
+      });
+      return response.status === 204;
+    } catch {
+      return false;
+    }
+  }
+
   async searchKnowledge(
     input: SearchKnowledgeInput,
   ): Promise<KnowledgeChunk[]> {
@@ -182,6 +201,7 @@ export class BackendClient {
             authorization: input.authorization,
             "content-type": "application/json",
             "x-trace-id": input.traceId,
+            ...(input.traceparent ? { traceparent: input.traceparent } : {}),
           },
           body: JSON.stringify({
             vector: input.vector,

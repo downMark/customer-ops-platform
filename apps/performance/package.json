@@ -1,0 +1,12 @@
+{
+  "name": "customer-ops-performance",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "install:js": "corepack pnpm --dir sdk/typescript install && corepack pnpm --dir cleaner install && corepack pnpm --dir agent install && corepack pnpm --dir console install && corepack pnpm --dir sentry install",
+    "build:js": "corepack pnpm --dir sdk/typescript build && corepack pnpm --dir cleaner build && corepack pnpm --dir agent build && corepack pnpm --dir console build",
+    "test:js": "corepack pnpm --dir sdk/typescript test && corepack pnpm --dir cleaner test && corepack pnpm --dir agent test",
+    "console": "corepack pnpm --dir console dev"
+  },
+  "packageManager": "pnpm@10.13.1"
+}

@@ -128,7 +128,7 @@ jobs:
       - name: Build and push immutable image
         uses: docker/build-push-action@v6
         with:
-          context: apps/model-api
+          context: .
           file: apps/model-api/Dockerfile
           platforms: linux/amd64
           push: true

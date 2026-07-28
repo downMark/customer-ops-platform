@@ -29,6 +29,7 @@ argon2 = "0.5"
 dotenvy = "0.15"
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
+customer-ops-performance = { path = "../performance/sdk/rust" }
 lambda_http = { version = "1.2", optional = true }
 # AWS SDK 仅在启用 `sns` feature 时编译（其最新版要求 rustc ≥ 1.94.1）。
 # 本地默认用 NoopPublisher，无需 AWS 依赖；部署环境用 `--features sns` 打开真实 SNS。

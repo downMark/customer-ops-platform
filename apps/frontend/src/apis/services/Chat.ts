@@ -4,6 +4,7 @@ import {
   ChatStreamHandlers,
   ChatStreamPayload,
 } from "../model/chat";
+import { browserPerformance } from "../../performance";
 
 class ChatService {
   /**
@@ -28,6 +29,12 @@ async function runSseStream(
   handlers: ChatStreamHandlers,
   signal: AbortSignal
 ) {
+  const span = browserPerformance.startSpan("chat.sse", {
+    attributes: { endpoint: "/api/chat/stream", httpMethod: "POST" },
+  });
+  const startedAt = performance.now();
+  let firstDelta = false;
+  let ttftMs: number | undefined;
   try {
     const token = AuthService.getAccessToken();
     if (!token) {
@@ -44,6 +51,7 @@ async function runSseStream(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
         Authorization: `Bearer ${token}`,
+        Traceparent: `00-${span.context.traceId}-${span.context.spanId}-${span.context.sampled ? "01" : "00"}`,
       },
       body: JSON.stringify(payload),
       signal,
@@ -72,10 +80,22 @@ async function runSseStream(
 
       const frames = buffer.split("\n\n");
       buffer = frames.pop() ?? "";
-      for (const frame of frames) dispatchSseFrame(frame, handlers);
+      for (const frame of frames) {
+        if (!firstDelta && frame.includes("event: delta")) {
+          firstDelta = true;
+          ttftMs = performance.now() - startedAt;
+        }
+        dispatchSseFrame(frame, handlers);
+      }
     }
+    span.finish("ok", ttftMs === undefined ? {} : { ttftMs });
   } catch (err) {
-    if ((err as Error)?.name === "AbortError") return;
+    if ((err as Error)?.name === "AbortError") {
+      span.finish("cancelled");
+      return;
+    }
+    span.finish("error");
+    browserPerformance.captureError("chat.sse", err, span.context);
     handlers.onError?.({
       code: "STREAM_FAILED",
       message: "无法连接聊天服务，请稍后重试。",

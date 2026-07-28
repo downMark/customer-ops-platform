@@ -3,6 +3,7 @@ import { createQueryClient } from "@app/utils/queryClient";
 import { prefetch, renderApp } from "./app";
 import { response } from "./stream/response";
 import type { AssetTags } from "./assets";
+import { createPerformanceMonitor } from "@app/utils/performance";
 
 interface RenderRequestOptions {
   assetTags: AssetTags;
@@ -28,10 +29,12 @@ export const renderRequest = async (
   { assetTags, transformHtml }: RenderRequestOptions
 ) => {
   const queryClient = createQueryClient();
+  const monitor = createPerformanceMonitor();
 
   try {
     ctx.set("Content-Type", "text/html");
     const { dehydratedState } = await prefetch(ctx, queryClient);
+    monitor.markPrefetchComplete();
     const { jsx, helmetContext } = renderApp(ctx, queryClient, dehydratedState);
 
     await response(
@@ -49,7 +52,9 @@ export const renderRequest = async (
         transformHtml,
       }
     );
+    monitor.markRenderComplete();
   } finally {
+    monitor.finish();
     queryClient.clear();
   }
 };

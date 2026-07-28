@@ -8,6 +8,7 @@ use crate::domain::conversation::{ConversationCompletion, ConversationRepository
 use crate::domain::repository::RepoError;
 use crate::infra::entity::conversation_completions as entity;
 use crate::infra::error::map_db_err;
+use crate::performance;
 
 pub struct SeaOrmConversationRepository {
     db: DatabaseConnection,
@@ -22,6 +23,7 @@ impl SeaOrmConversationRepository {
 #[async_trait]
 impl ConversationRepository for SeaOrmConversationRepository {
     async fn save_once(&self, rec: &ConversationCompletion) -> Result<SaveOutcome, RepoError> {
+        let span = performance::client().start_span("db.conversation.save", None);
         let model = entity::ActiveModel {
             conversation_id: Set(rec.conversation_id.clone()),
             order_id: Set(rec.order_id.clone()),
@@ -43,9 +45,11 @@ impl ConversationRepository for SeaOrmConversationRepository {
             .map_err(map_db_err)?;
 
         // Conflicted → 已存在；Inserted/Empty → 视为已插入（单条插入不会 Empty）。
-        match res {
+        let outcome = match res {
             TryInsertResult::Conflicted => Ok(SaveOutcome::AlreadyExists),
             _ => Ok(SaveOutcome::Inserted),
-        }
+        };
+        span.finish("ok");
+        outcome
     }
 }

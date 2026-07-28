@@ -24,6 +24,7 @@
 	"author": "",
 	"license": "ISC",
 	"dependencies": {
+		"@customer-ops/performance": "link:../performance/sdk/typescript",
 		"@hookform/resolvers": "^5.2.2",
 		"@koa/router": "^12.0.0",
 		"@radix-ui/react-popover": "^1.1.15",

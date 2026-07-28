@@ -173,6 +173,18 @@ Resources:
         - Key: Name
           Value: !Sub customer-ops-${Environment}-model-server
 
+  PerformanceCleanerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Outbound-only performance cleaner tasks
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub customer-ops-${Environment}-performance-cleaner
+
   ModelServerSubnet1Ingress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -214,6 +226,98 @@ Resources:
       LifecyclePolicy:
         LifecyclePolicyText: |
           {"rules":[{"rulePriority":1,"description":"Retain 10 model-server images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  PerformanceCleanerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub customer-ops/${Environment}/performance-cleaner
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Retain 20 cleaner images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},"action":{"type":"expire"}}]}
+
+  PerformanceStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub customer-ops-${Environment}-performance
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+      RetentionPeriodHours: 24
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+
+  PerformanceDetailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub customer-ops-${Environment}-performance-detail-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpirePerformanceDetails
+            Status: Enabled
+            ExpirationInDays: 30
+
+  PerformanceStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub customer-ops-${Environment}-performance-state
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  PerformanceAggregateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub customer-ops-${Environment}-performance-aggregate
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: environment
+          AttributeType: S
+        - AttributeName: bucketStart
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: environment-time-index
+          KeySchema:
+            - AttributeName: environment
+              KeyType: HASH
+            - AttributeName: bucketStart
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   DeploymentBucket:
     Type: AWS::S3::Bucket
@@ -568,6 +672,64 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
 
+  PerformanceCleanerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-performance-cleaner-task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CleanPerformanceEvents
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListShards
+                  - kinesis:GetShardIterator
+                  - kinesis:GetRecords
+                Resource: !GetAtt PerformanceStream.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt PerformanceStateTable.Arn
+                  - !GetAtt PerformanceAggregateTable.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${PerformanceDetailBucket.Arn}/*
+
+  PerformanceLogsToKinesisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub customer-ops-${Environment}-logs-to-performance
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.${AWS::URLSuffix}
+            Action: sts:AssumeRole
+            Condition:
+              StringLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+      Policies:
+        - PolicyName: WritePerformanceStream
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kinesis:PutRecord
+                Resource: !GetAtt PerformanceStream.Arn
+
   ModelApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -578,6 +740,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /customer-ops/${Environment}/model-server
+      RetentionInDays: 30
+
+  PerformanceCleanerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /customer-ops/${Environment}/performance-cleaner
       RetentionInDays: 30
 
   BackendLogGroup:
@@ -607,6 +775,10 @@ Outputs:
     Value: !Ref ModelServerSecurityGroup
     Export:
       Name: !Sub customer-ops-${Environment}-model-server-sg
+  PerformanceCleanerSecurityGroupId:
+    Value: !Ref PerformanceCleanerSecurityGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-cleaner-sg
   ClusterName:
     Value: !Ref EcsCluster
     Export:
@@ -625,6 +797,8 @@ Outputs:
     Value: !GetAtt ModelServerRepository.RepositoryUri
   ModelServerRepositoryName:
     Value: !Ref ModelServerRepository
+  PerformanceCleanerRepositoryName:
+    Value: !Ref PerformanceCleanerRepository
   DeploymentBucketName:
     Value: !Ref DeploymentBucket
   EcsTaskExecutionRoleArn:
@@ -639,6 +813,34 @@ Outputs:
     Value: !GetAtt ModelApiTaskRole.Arn
     Export:
       Name: !Sub customer-ops-${Environment}-model-api-task-role
+  PerformanceCleanerTaskRoleArn:
+    Value: !GetAtt PerformanceCleanerTaskRole.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-cleaner-task-role
+  PerformanceStreamName:
+    Value: !Ref PerformanceStream
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-stream-name
+  PerformanceStreamArn:
+    Value: !GetAtt PerformanceStream.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-stream-arn
+  PerformanceLogsRoleArn:
+    Value: !GetAtt PerformanceLogsToKinesisRole.Arn
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-logs-role
+  PerformanceStateTableName:
+    Value: !Ref PerformanceStateTable
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-state-table
+  PerformanceAggregateTableName:
+    Value: !Ref PerformanceAggregateTable
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-aggregate-table
+  PerformanceDetailBucketName:
+    Value: !Ref PerformanceDetailBucket
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-detail-bucket
   DatabaseSecretArn:
     Value: !Ref DatabaseSecret
     Export:
@@ -707,6 +909,10 @@ Outputs:
     Value: !Ref ModelServerLogGroup
     Export:
       Name: !Sub customer-ops-${Environment}-model-server-log-group
+  PerformanceCleanerLogGroupName:
+    Value: !Ref PerformanceCleanerLogGroup
+    Export:
+      Name: !Sub customer-ops-${Environment}-performance-cleaner-log-group
   FrontendOrigin:
     Value: !Ref FrontendOrigin
     Export:

@@ -15,6 +15,7 @@ use crate::domain::operations::{
     AlarmStatus, AwsStatus, FailureTestAccepted, FailureTestStatus, Operations, OperationsError,
     QueueMetrics, QueueStatus, RecoveryAccepted, TopicStatus,
 };
+use crate::performance;
 
 const CURRENT_TEST_KEY: &str = "CURRENT";
 
@@ -290,6 +291,7 @@ impl AwsOperations {
 #[async_trait]
 impl Operations for AwsOperations {
     async fn status(&self) -> Result<AwsStatus, OperationsError> {
+        let span = performance::client().start_span("aws.operations.status", None);
         let (topic, queues, alarms, mut failure_test) = tokio::try_join!(
             self.topic_status(),
             self.queue_statuses(),
@@ -318,16 +320,19 @@ impl Operations for AwsOperations {
             }
         }
 
-        Ok(AwsStatus {
+        let result = Ok(AwsStatus {
             topic,
             queues,
             alarms,
             failure_test,
             refreshed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-        })
+        });
+        span.finish("ok");
+        result
     }
 
     async fn trigger_failure_test(&self) -> Result<FailureTestAccepted, OperationsError> {
+        let span = performance::client().start_span("aws.operations.failure_test", None);
         let status = self.status().await?;
         if status.queues.iter().any(|queue| {
             queue.dead_letter_queue
@@ -403,16 +408,19 @@ impl Operations for AwsOperations {
             return Err(dependency(error));
         }
 
-        Ok(FailureTestAccepted {
+        let result = Ok(FailureTestAccepted {
             test_id,
             status: "active".into(),
-        })
+        });
+        span.finish("ok");
+        result
     }
 
     async fn recover_failure_test(
         &self,
         test_id: &str,
     ) -> Result<RecoveryAccepted, OperationsError> {
+        let span = performance::client().start_span("aws.operations.recover", None);
         let current = self
             .current_test()
             .await?
@@ -454,12 +462,14 @@ impl Operations for AwsOperations {
             }
         };
 
-        Ok(RecoveryAccepted {
+        let result = Ok(RecoveryAccepted {
             test_id: test_id.into(),
             status: "recovered".into(),
             quality_redrive_task: quality_task,
             analytics_redrive_task: analytics_task,
-        })
+        });
+        span.finish("ok");
+        result
     }
 }
 

@@ -6,6 +6,7 @@ import {
   OrderPage,
 } from "../model/order";
 import AuthService from "./Auth";
+import { performanceFetch } from "../../performance";
 
 interface ApiEnvelope<T> {
   code: number;
@@ -24,7 +25,7 @@ class OrderService {
       throw new Error("登录状态已失效，请重新登录。");
     }
 
-    const response = await fetch(`${getApiBaseURL()}${path}`, {
+    const response = await performanceFetch(`${getApiBaseURL()}${path}`, {
       ...init,
       headers: {
         Accept: "application/json",

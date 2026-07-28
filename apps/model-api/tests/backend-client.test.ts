@@ -102,6 +102,26 @@ describe("BackendClient", () => {
     });
   });
 
+  it("通过后端验证遥测 bearer token", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+    const client = new BackendClient({
+      baseUrl: "http://backend.test",
+      fetchImpl,
+    });
+    await expect(client.validateAuth("Bearer signed-token")).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://backend.test/api/auth/validate",
+      expect.objectContaining({
+        method: "GET",
+        headers: expect.objectContaining({
+          authorization: "Bearer signed-token",
+        }),
+      }),
+    );
+  });
+
   it("把后端 404 转换为稳定业务错误", async () => {
     const client = new BackendClient({
       fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(

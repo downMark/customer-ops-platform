@@ -21,7 +21,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-pythonpath = ["."]
+pythonpath = [".", "../performance/sdk/python/src"]
 
 [tool.uv]
 package = false

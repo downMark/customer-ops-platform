@@ -2,6 +2,7 @@ use crate::domain::product::Product;
 use crate::domain::repository::{ProductRepository, RepoError};
 use crate::infra::entity::products;
 use crate::infra::error::map_db_err;
+use crate::performance;
 use async_trait::async_trait;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, PaginatorTrait,
@@ -36,6 +37,7 @@ impl ProductRepository for SeaOrmProductRepository {
         offset: u64,
         limit: u64,
     ) -> Result<(Vec<Product>, u64), RepoError> {
+        let span = performance::client().start_span("db.product.list", None);
         let mut q = products::Entity::find();
         if let Some(k) = keyword {
             q = q.filter(
@@ -55,9 +57,12 @@ impl ProductRepository for SeaOrmProductRepository {
             .all(&self.db)
             .await
             .map_err(map_db_err)?;
-        Ok((rows.into_iter().map(convert).collect(), total))
+        let result = Ok((rows.into_iter().map(convert).collect(), total));
+        span.finish("ok");
+        result
     }
     async fn create(&self, product: &Product) -> Result<bool, RepoError> {
+        let span = performance::client().start_span("db.product.create", None);
         let result = self
             .db
             .execute(Statement::from_sql_and_values(
@@ -77,6 +82,7 @@ impl ProductRepository for SeaOrmProductRepository {
             ))
             .await
             .map_err(map_db_err)?;
+        span.finish("ok");
         Ok(result.rows_affected() == 1)
     }
 }

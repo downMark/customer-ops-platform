@@ -15,6 +15,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@customer-ops/performance": "link:../performance/sdk/typescript",
     "@ai-sdk/openai-compatible": "latest",
     "@mastra/core": "latest",
     "zod": "^3.25.76"

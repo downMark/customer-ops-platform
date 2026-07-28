@@ -25,6 +25,7 @@ from .schemas import (
     RerankResult,
 )
 from .settings import Settings
+from .telemetry import GpuSampler, TimedInferenceLock, parent_context, performance
 
 ChatEngineFactory = Callable[[Settings, Lock], ChatEngine]
 EmbeddingEngineFactory = Callable[[Settings, Lock], EmbeddingEngine]
@@ -41,7 +42,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        inference_lock = Lock()
+        inference_lock = TimedInferenceLock()
+        gpu_sampler = GpuSampler()
         app.state.engine = await run_in_threadpool(
             engine_factory, app_settings, inference_lock
         )
@@ -51,7 +53,12 @@ def create_app(
         app.state.rerank_engine = await run_in_threadpool(
             rerank_engine_factory, app_settings, inference_lock
         )
-        yield
+        gpu_sampler.start()
+        try:
+            yield
+        finally:
+            gpu_sampler.close()
+            performance.flush()
 
     app = FastAPI(
         title="Customer Ops Model Server",
@@ -116,18 +123,61 @@ def create_app(
     )
     async def chat_completions(
         body: ChatCompletionRequest,
+        request: Request,
         engine: ChatEngine = Depends(get_engine),
     ) -> Any:
+        span = performance.start_span(
+            "model.chat",
+            parent_context(request.headers.get("traceparent")),
+            attributes={"model": body.model, "endpoint": "/v1/chat/completions"},
+        )
         if body.model != app_settings.model_alias:
+            span.finish("error")
             raise HTTPException(status_code=404, detail="Model not found")
 
         if not body.stream:
-            return await run_in_threadpool(engine.complete, body)
+            try:
+                response = await run_in_threadpool(engine.complete, body)
+                usage = response.get("usage", {})
+                span.finish(
+                    "ok",
+                    {
+                        "inputTokens": float(usage.get("prompt_tokens", 0)),
+                        "outputTokens": float(usage.get("completion_tokens", 0)),
+                    },
+                )
+                return response
+            except Exception as error:
+                span.finish("error")
+                performance.capture_error("model.chat", error, span.context)
+                raise
 
         def event_stream() -> Iterator[str]:
-            for chunk in engine.stream(body):
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+            started_at = time.perf_counter()
+            first_token_at: float | None = None
+            output_chunks = 0
+            try:
+                for chunk in engine.stream(body):
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    output_chunks += 1
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                elapsed = max(time.perf_counter() - started_at, 0.000001)
+                span.finish(
+                    "ok",
+                    {
+                        "ttftMs": ((first_token_at or time.perf_counter()) - started_at) * 1000,
+                        "tokensPerSecond": output_chunks / elapsed,
+                    },
+                )
+                yield "data: [DONE]\n\n"
+            except GeneratorExit:
+                span.finish("cancelled")
+                raise
+            except Exception as error:
+                span.finish("error")
+                performance.capture_error("model.chat", error, span.context)
+                raise
 
         return StreamingResponse(
             event_stream(),
@@ -145,12 +195,28 @@ def create_app(
     )
     async def embeddings(
         body: EmbeddingRequest,
+        request: Request,
         engine: EmbeddingEngine = Depends(get_embedding_engine),
     ) -> EmbeddingResponse:
+        span = performance.start_span(
+            "model.embedding",
+            parent_context(request.headers.get("traceparent")),
+            attributes={"model": body.model, "endpoint": "/v1/embeddings"},
+        )
         if body.model != app_settings.embedding_model_alias:
+            span.finish("error")
             raise HTTPException(status_code=404, detail="Model not found")
         texts = [body.input] if isinstance(body.input, str) else body.input
-        vectors, token_count = await run_in_threadpool(engine.embed, texts)
+        try:
+            vectors, token_count = await run_in_threadpool(engine.embed, texts)
+            span.finish(
+                "ok",
+                {"batchSize": float(len(texts)), "inputTokens": float(token_count)},
+            )
+        except Exception as error:
+            span.finish("error")
+            performance.capture_error("model.embedding", error, span.context)
+            raise
         return EmbeddingResponse(
             data=[
                 EmbeddingData(index=index, embedding=embedding)
@@ -170,11 +236,24 @@ def create_app(
     )
     async def rerank(
         body: RerankRequest,
+        request: Request,
         engine: RerankEngine = Depends(get_rerank_engine),
     ) -> RerankResponse:
+        span = performance.start_span(
+            "model.rerank",
+            parent_context(request.headers.get("traceparent")),
+            attributes={"model": body.model, "endpoint": "/v1/rerank"},
+        )
         if body.model != app_settings.rerank_model_alias:
+            span.finish("error")
             raise HTTPException(status_code=404, detail="Model not found")
-        ranked = await run_in_threadpool(engine.rerank, body.query, body.documents)
+        try:
+            ranked = await run_in_threadpool(engine.rerank, body.query, body.documents)
+            span.finish("ok", {"batchSize": float(len(body.documents))})
+        except Exception as error:
+            span.finish("error")
+            performance.capture_error("model.rerank", error, span.context)
+            raise
         if body.top_n is not None:
             ranked = ranked[: min(body.top_n, len(ranked))]
         return RerankResponse(

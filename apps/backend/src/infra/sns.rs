@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use crate::domain::event::{ConversationCompleted, EventPublisher, PublishError};
+use crate::performance;
 
 /// 生产用 SNS 发布器。仅在启用 `sns` feature 时编译。
 #[cfg(feature = "sns")]
@@ -28,6 +29,7 @@ impl SnsPublisher {
 impl EventPublisher for SnsPublisher {
     async fn publish(&self, event: &ConversationCompleted) -> Result<(), PublishError> {
         use aws_sdk_sns::types::MessageAttributeValue;
+        let span = performance::client().start_span("sns.publish", None);
 
         let body =
             serde_json::to_string(event).map_err(|e| PublishError::Internal(e.to_string()))?;
@@ -47,6 +49,7 @@ impl EventPublisher for SnsPublisher {
             .send()
             .await
             .map_err(|e| PublishError::Unavailable(e.to_string()))?;
+        span.finish("ok");
         Ok(())
     }
 }

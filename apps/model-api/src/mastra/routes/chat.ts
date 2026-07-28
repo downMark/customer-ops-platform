@@ -13,6 +13,12 @@ import {
   errorSseData,
   sseResponse,
 } from "../../http/sse";
+import {
+  performanceClient,
+  requestTraceContext,
+  withPerformanceTrace,
+} from "../../performance";
+import { formatTraceparent } from "../../performance-sdk";
 
 function getBearerToken(authorization: string | undefined): string {
   if (!authorization?.match(/^Bearer\s+\S+$/i)) {
@@ -97,8 +103,16 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
     }
 
     const request = parsed.data;
+    const requestSpan = performanceClient.startSpan("chat.stream", {
+      parent: requestTraceContext(c.req.header("traceparent")),
+      attributes: { endpoint: "/api/chat/stream", httpMethod: "POST" },
+    });
+    const downstreamTraceparent = formatTraceparent(requestSpan.context);
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        const startedAt = performance.now();
+        let firstDelta = false;
+        let ttftMs: number | undefined;
         controller.enqueue(encodeSse({ event: "start", data: { traceId } }));
         // BGE and a CPU-only LLM can have a long time-to-first-token. Keep the
         // public ALB/Cloudflare/browser stream active while no model delta exists.
@@ -117,6 +131,7 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
                   orderId: request.orderId,
                   authorization,
                   traceId,
+                  traceparent: downstreamTraceparent,
                   signal: c.req.raw.signal,
                 })
               : Promise.resolve(undefined),
@@ -124,22 +139,30 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
               query: request.message,
               authorization,
               traceId,
+              traceparent: downstreamTraceparent,
               signal: c.req.raw.signal,
             }),
           ]);
 
           const agent = c.get("mastra").getAgent("customerOpsAgent");
-          const result = await agent.stream(
-            buildCustomerPrompt(request, order, references),
-            {
-              abortSignal: withTimeout(
-                config.modelTimeoutMs,
-                c.req.raw.signal,
-              ),
-            },
+          const result = await withPerformanceTrace(
+            requestSpan.context,
+            () => agent.stream(
+              buildCustomerPrompt(request, order, references),
+              {
+                abortSignal: withTimeout(
+                  config.modelTimeoutMs,
+                  c.req.raw.signal,
+                ),
+              },
+            ),
           );
 
           for await (const text of result.textStream) {
+            if (!firstDelta) {
+              firstDelta = true;
+              ttftMs = performance.now() - startedAt;
+            }
             controller.enqueue(encodeSse({ event: "delta", data: { text } }));
           }
 
@@ -149,6 +172,7 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
               data: { conversationId: request.conversationId },
             }),
           );
+          requestSpan.finish("ok", ttftMs === undefined ? {} : { ttftMs });
         } catch (caught) {
           const sourceError = toAppError(caught);
           const error =
@@ -167,6 +191,17 @@ export const chatRoute = registerApiRoute("/api/chat/stream", {
               data: errorSseData(error, traceId),
             }),
           );
+          const cancelled =
+            caught instanceof Error && caught.name === "AbortError";
+          requestSpan.finish(cancelled ? "cancelled" : "error");
+          if (!cancelled) {
+            performanceClient.captureError(
+              "chat.stream",
+              caught,
+              requestSpan.context,
+              error.code,
+            );
+          }
         } finally {
           clearInterval(heartbeat);
           controller.close();
