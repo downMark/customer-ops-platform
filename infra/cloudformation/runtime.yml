@@ -615,6 +615,8 @@ Resources:
               Value: "8000"
             - Name: MODEL_GPU_LAYERS
               Value: "0"
+            - Name: MODEL_DISABLE_THINKING
+              Value: "true"
             - Name: MODEL_THREADS
               Value: "4"
           Secrets:
@@ -745,6 +747,8 @@ Resources:
               Value: "true"
             - Name: RAG_RETRIEVAL_TOP_K
               Value: "20"
+            - Name: RAG_RERANK_TOP_K
+              Value: "3"
             - Name: RAG_FINAL_TOP_K
               Value: "3"
             - Name: RAG_MIN_RERANK_SCORE

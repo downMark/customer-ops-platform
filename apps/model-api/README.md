@@ -85,6 +85,9 @@ Task Definition 必须配置：
 - `RAG_RETRIEVAL_TOP_K` / `RAG_FINAL_TOP_K`：候选数与最终资料数。
 - `RAG_MIN_RERANK_SCORE`：最低相关性分数，默认 `0.1`。
 - `RAG_TIMEOUT_MS`：整条知识链路超时，默认 8000ms。
+- `RAG_RETRIEVAL_TOP_K`：Neon 向量召回数量，默认 20。
+- `RAG_RERANK_TOP_K`：送入 CPU reranker 的候选数量，默认 3。
+- `RAG_FINAL_TOP_K`：最终注入 prompt 的资料数量，默认 3。
 - `CORS_ORIGINS`：仅包含实际 Cloudflare 前端域名。
 
 提交 `apps/model-api/**` 到 `main` 后，

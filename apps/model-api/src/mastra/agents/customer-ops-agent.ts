@@ -21,8 +21,6 @@ export const customerOpsAgent = new Agent({
 8. 回答温和、简洁，先给结论，再说明下一步。
 9. 不输出分析过程或思考过程。
 10. 当前提供的是演示数据，不得声称已经执行真实退款、改址或取消操作。
-
-/no_think
 `,
   model: customerOpsModel,
 });

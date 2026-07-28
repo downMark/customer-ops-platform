@@ -5,6 +5,10 @@ from threading import Lock
 from typing import Any, Protocol, cast
 
 from llama_cpp import Llama
+from llama_cpp.llama_chat_format import (
+    ChatFormatterResponse,
+    chat_formatter_to_chat_completion_handler,
+)
 
 from .schemas import ChatCompletionRequest
 from .settings import Settings
@@ -16,6 +20,20 @@ class ChatEngine(Protocol):
     def stream(self, request: ChatCompletionRequest) -> Iterator[dict[str, Any]]: ...
 
 
+def _format_chatml_without_thinking(
+    messages: list[dict[str, Any]],
+    **_: Any,
+) -> ChatFormatterResponse:
+    """Render Qwen3 ChatML with an already-completed empty thinking block."""
+    prompt = "".join(
+        f"<|im_start|>{message['role']}\n"
+        f"{message.get('content') or ''}<|im_end|>\n"
+        for message in messages
+    )
+    prompt += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    return ChatFormatterResponse(prompt=prompt, stop="<|im_end|>")
+
+
 class LlamaCppEngine:
     def __init__(self, settings: Settings, inference_lock: Lock | None = None) -> None:
         settings.validate_chat()
@@ -25,6 +43,10 @@ class LlamaCppEngine:
             "n_gpu_layers": settings.gpu_layers,
             "verbose": settings.verbose,
         }
+        if settings.disable_thinking:
+            kwargs["chat_handler"] = chat_formatter_to_chat_completion_handler(
+                _format_chatml_without_thinking
+            )
         if settings.threads > 0:
             kwargs["n_threads"] = settings.threads
 

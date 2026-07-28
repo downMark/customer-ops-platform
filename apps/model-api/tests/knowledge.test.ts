@@ -32,8 +32,26 @@ describe("retrieveKnowledge", () => {
         metadata: { productId: "PROD-008" },
         score: 0.7,
       },
+      {
+        id: 3,
+        documentId: "television-guide",
+        chunkIndex: 0,
+        content: "检查电视背光和输入源",
+        source: "television.md",
+        metadata: { productId: "PROD-007" },
+        score: 0.6,
+      },
+      {
+        id: 4,
+        documentId: "unrelated-guide",
+        chunkIndex: 0,
+        content: "这条候选不应送入 reranker",
+        source: "unrelated.md",
+        metadata: {},
+        score: 0.5,
+      },
     ]);
-    vi.spyOn(modelServerClient, "rerank").mockResolvedValue([
+    const rerank = vi.spyOn(modelServerClient, "rerank").mockResolvedValue([
       { index: 0, score: 0.95 },
       { index: 1, score: 0.05 },
     ]);
@@ -48,6 +66,12 @@ describe("retrieveKnowledge", () => {
       documentId: "refrigerator-guide",
       rerankScore: 0.95,
     });
+    expect(rerank).toHaveBeenCalledWith(
+      "冰箱不制冷",
+      ["检查冰箱电源", "检查显示器信号线", "检查电视背光和输入源"],
+      3,
+      expect.any(AbortSignal),
+    );
   });
 
   it("检索失败时降级为空资料", async () => {

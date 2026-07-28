@@ -71,8 +71,13 @@ MODEL_HOST=0.0.0.0
 MODEL_PORT=8000
 MODEL_GPU_LAYERS=0
 MODEL_THREADS=4
+MODEL_DISABLE_THINKING=true
 MODEL_SERVER_API_KEY=<Secrets Manager 注入>
 ```
+
+`MODEL_DISABLE_THINKING=true` 会在 Qwen3 assistant prompt 中预填空的
+thinking block，使 OpenAI-compatible `content` 立即开始输出；客服链路不生成
+或暴露隐藏思考内容。
 
 可选配置 `MODEL_SHA256`，启动时会在加载 GGUF 前核对摘要。两个 ONNX
 目录使用各自的 `SHA256SUMS` 逐文件校验。Task Role 需要限定到

@@ -36,16 +36,17 @@ export async function retrieveKnowledge(
     if (candidates.length === 0) {
       return [];
     }
+    const rerankCandidates = candidates.slice(0, config.ragRerankTopK);
     const ranked = await modelServerClient.rerank(
       input.query,
-      candidates.map((candidate) => candidate.content),
+      rerankCandidates.map((candidate) => candidate.content),
       config.ragFinalTopK,
       signal,
     );
     return ranked
       .filter((result) => result.score >= config.ragMinRerankScore)
       .map((result) => ({
-        ...candidates[result.index],
+        ...rerankCandidates[result.index],
         rerankScore: result.score,
       }));
   } catch (error) {

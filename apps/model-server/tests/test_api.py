@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from app.engine import _format_chatml_without_thinking
 from app.main import create_app
 from app.schemas import ChatCompletionRequest
 from app.settings import Settings
@@ -79,6 +80,7 @@ def settings() -> Settings:
         embedding_max_length=1024,
         rerank_max_length=1024,
         onnx_threads=1,
+        disable_thinking=True,
         verbose=False,
     )
 
@@ -131,6 +133,21 @@ def test_streams_openai_compatible_events() -> None:
         assert response.status_code == 200
         assert '"content": "已发货"' in response.text
         assert "data: [DONE]" in response.text
+
+
+def test_qwen_chat_template_starts_with_empty_thinking_block() -> None:
+    formatted = _format_chatml_without_thinking(
+        [
+            {"role": "system", "content": "你是客服。"},
+            {"role": "user", "content": "冰箱不制冷怎么办？"},
+        ]
+    )
+
+    assert formatted.prompt.endswith(
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+    assert "<|im_start|>user\n冰箱不制冷怎么办？<|im_end|>\n" in formatted.prompt
+    assert formatted.stop == "<|im_end|>"
 
 
 def test_embeddings_are_openai_compatible() -> None:

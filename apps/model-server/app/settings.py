@@ -50,6 +50,7 @@ class Settings:
     embedding_max_length: int
     rerank_max_length: int
     onnx_threads: int
+    disable_thinking: bool
     verbose: bool
 
     @classmethod
@@ -92,6 +93,7 @@ class Settings:
             embedding_max_length=_integer("EMBEDDING_MAX_LENGTH", 1024),
             rerank_max_length=_integer("RERANK_MAX_LENGTH", 1024),
             onnx_threads=_integer("ONNX_THREADS", 1),
+            disable_thinking=_boolean("MODEL_DISABLE_THINKING", True),
             verbose=_boolean("MODEL_VERBOSE", False),
         )
 
