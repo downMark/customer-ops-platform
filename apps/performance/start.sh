@@ -9,6 +9,7 @@ CONSOLE_ENV="${CONSOLE_DIR}/.env"
 CONSOLE_PID_FILE="${RUNTIME_DIR}/console.pid"
 CONSOLE_LOG="${RUNTIME_DIR}/console.log"
 SENTRY_DIR="${SCRIPT_DIR}/sentry/.runtime/self-hosted"
+SENTRY_INSTALL_MARKER="${SENTRY_DIR}/.customer-ops-install-complete"
 SENTRY_MODE="required"
 
 usage() {
@@ -61,6 +62,19 @@ if [ "${SENTRY_MODE}" = "required" ]; then
     echo "Start Docker Desktop, then run ./start.sh again." >&2
     exit 1
   }
+  compose_version="$(docker compose version --short 2>/dev/null || true)"
+  if ! node -e '
+    const current = process.argv[1].replace(/^v/, "").split(/[.-]/).slice(0, 3).map(Number);
+    const minimum = process.argv[2].split(".").map(Number);
+    process.exit(current.some((value, index) => value > minimum[index] &&
+      current.slice(0, index).every((part, prior) => part === minimum[prior])) ||
+      current.every((value, index) => value >= minimum[index] &&
+        current.slice(0, index).every((part, prior) => part === minimum[prior])) ? 0 : 1);
+  ' "${compose_version}" "2.32.2"; then
+    echo "Docker Compose 2.32.2 or later is required; found ${compose_version:-not installed}." >&2
+    echo "Upgrade Docker Desktop, restart it, then run ./start.sh again." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "${RUNTIME_DIR}"
@@ -123,7 +137,7 @@ if [ ! -f "${CONSOLE_PID_FILE}" ]; then
   echo "Performance Console: http://127.0.0.1:${console_port}"
 fi
 
-if [ "${SENTRY_MODE}" = "required" ] && [ ! -f "${SENTRY_DIR}/docker-compose.yml" ]; then
+if [ "${SENTRY_MODE}" = "required" ] && [ ! -f "${SENTRY_INSTALL_MARKER}" ]; then
   "${SCRIPT_DIR}/sentry/install.sh"
 fi
 if [ "${SENTRY_MODE}" != "disabled" ] && [ -f "${SENTRY_DIR}/docker-compose.yml" ]; then

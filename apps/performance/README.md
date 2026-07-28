@@ -22,7 +22,9 @@ Console 与 Sentry 仅绑定 `127.0.0.1`，不加入任何云端发布工作流�
 ## 本地运行
 
 一键启动本地 Console、Kimi AIOps Agent 和 Sentry。首次运行会自动安装固定版本
-的 Sentry self-hosted，因此需要先启动 Docker Desktop，且首次耗时会较长：
+的 Sentry self-hosted，因此需要 Docker Compose 2.32.2 或更高版本，并先启动
+Docker Desktop。首次安装耗时会较长；默认不向 Sentry 上报 self-hosted 安装
+问题：
 
 ```bash
 cd apps/performance
