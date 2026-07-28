@@ -8,7 +8,27 @@ SENTRY_DIR="${RUNTIME_DIR}/self-hosted"
 INSTALL_MARKER="${SENTRY_DIR}/.customer-ops-install-complete"
 MINIMUM_COMPOSE_VERSION="2.32.2"
 MINIMUM_MEMORY_MIB=14000
+SENTRY_PATCH="${SCRIPT_DIR}/patches/0001-optional-compose-pull.patch"
 export DOCKER_CONFIG="${SENTRY_DOCKER_CONFIG:-${SCRIPT_DIR}/docker-public}"
+
+resolve_sentry_bash() {
+  local candidate
+
+  for candidate in \
+    "${SENTRY_BASH:-}" \
+    /opt/homebrew/bin/bash \
+    /usr/local/bin/bash \
+    "$(command -v bash 2>/dev/null || true)"; do
+    if [ -n "${candidate}" ] &&
+      [ -x "${candidate}" ] &&
+      LC_ALL=C LANG=C "${candidate}" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))'
+    then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 remove_appledouble_files() {
   local target="$1"
@@ -22,9 +42,53 @@ remove_appledouble_files() {
   fi
 }
 
+apply_sentry_patches() {
+  local target="${SENTRY_DIR}/install/update-docker-images.sh"
+
+  if ! grep -q 'SKIP_COMPOSE_PULL' "${target}"; then
+    echo "Applying local Sentry installer compatibility patch..."
+    patch --directory="${SENTRY_DIR}" --strip=1 <"${SENTRY_PATCH}"
+  fi
+}
+
+pull_sentry_images_sequentially() {
+  local image
+  local attempt
+
+  echo "Checking Sentry images sequentially..."
+  {
+    docker compose --project-directory "${SENTRY_DIR}" \
+      --env-file "${SENTRY_DIR}/.env" config --images
+    awk -F= '/^[A-Z0-9_]+_IMAGE=/ { print $2 }' "${SENTRY_DIR}/.env"
+  } | sort -u | while IFS= read -r image; do
+    case "${image}" in
+      ""|*-self-hosted-local) continue ;;
+    esac
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+      echo "Image cached: ${image}"
+      continue
+    fi
+    attempt=1
+    until docker pull "${image}"; do
+      if (( attempt >= 3 )); then
+        echo "Failed to pull ${image} after ${attempt} attempts." >&2
+        return 1
+      fi
+      attempt=$((attempt + 1))
+      echo "Retrying ${image} (${attempt}/3)..."
+    done
+  done
+}
+
 if [ -f "${INSTALL_MARKER}" ]; then
   echo "Sentry self-hosted is already installed at ${SENTRY_DIR}"
   exit 0
+fi
+
+if ! SENTRY_BASH_BIN="$(resolve_sentry_bash)"; then
+  echo "Sentry requires Bash 4.4 or later; macOS /bin/bash is too old." >&2
+  echo "Install it with: brew install bash" >&2
+  exit 1
 fi
 
 compose_version="$(docker compose version --short 2>/dev/null || true)"
@@ -61,13 +125,19 @@ fi
 # BuildKit interprets those files as xattr metadata and fails while sending a
 # Docker build context (for example jq/._Dockerfile on exFAT volumes).
 remove_appledouble_files "${SENTRY_DIR}"
+apply_sentry_patches
+pull_sentry_images_sequentially
 (
   cd "${SENTRY_DIR}"
   COPYFILE_DISABLE=1 \
     COPY_EXTENDED_ATTRIBUTES_DISABLE=1 \
+    COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-2}" \
+    LC_ALL=C \
+    LANG=C \
     REPORT_SELF_HOSTED_ISSUES="${REPORT_SELF_HOSTED_ISSUES:-0}" \
     SENTRY_BIND=127.0.0.1:9000 \
-    ./install.sh --skip-user-creation
+    SKIP_COMPOSE_PULL=1 \
+    "${SENTRY_BASH_BIN}" ./install.sh --skip-user-creation
 )
 touch "${INSTALL_MARKER}"
 

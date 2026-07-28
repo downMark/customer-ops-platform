@@ -13,6 +13,25 @@ SENTRY_INSTALL_MARKER="${SENTRY_DIR}/.customer-ops-install-complete"
 SENTRY_MODE="required"
 MINIMUM_SENTRY_MEMORY_MIB=14000
 
+resolve_sentry_bash() {
+  local candidate
+
+  for candidate in \
+    "${SENTRY_BASH:-}" \
+    /opt/homebrew/bin/bash \
+    /usr/local/bin/bash \
+    "$(command -v bash 2>/dev/null || true)"; do
+    if [ -n "${candidate}" ] &&
+      [ -x "${candidate}" ] &&
+      LC_ALL=C LANG=C "${candidate}" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))'
+    then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./start.sh [--console-only]
@@ -53,6 +72,12 @@ command -v corepack >/dev/null 2>&1 || {
   exit 1
 }
 if [ "${SENTRY_MODE}" = "required" ]; then
+  if ! sentry_bash_bin="$(resolve_sentry_bash)"; then
+    echo "Sentry requires Bash 4.4 or later; macOS /bin/bash is too old." >&2
+    echo "Install it with: brew install bash" >&2
+    exit 1
+  fi
+  echo "Sentry Bash: ${sentry_bash_bin} ($(LC_ALL=C LANG=C "${sentry_bash_bin}" -c 'printf "%s" "$BASH_VERSION"'))"
   command -v docker >/dev/null 2>&1 || {
     echo "Docker is required to install and run local Sentry." >&2
     echo "Install and start Docker Desktop, then run ./start.sh again." >&2

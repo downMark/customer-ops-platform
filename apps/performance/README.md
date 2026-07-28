@@ -26,7 +26,9 @@ Console 与 Sentry 仅绑定 `127.0.0.1`，不加入任何云端发布工作流�
 Docker Desktop。首次安装耗时会较长；默认不向 Sentry 上报 self-hosted 安装
 问题。Sentry 还要求 Docker 至少分配 14000 MiB 内存；在 Docker Desktop 的
 Settings → Resources → Advanced 中将 Memory 设置为至少 14 GB 并重启。
-如果本机无法提供该内存，可使用 `./start.sh --console-only`：
+macOS 自带 Bash 3.2 不满足要求，首次运行前执行 `brew install bash`；启动器
+会自动选择 Homebrew Bash 4.4+。如果本机无法提供所需内存，可使用
+`./start.sh --console-only`：
 
 ```bash
 cd apps/performance
@@ -84,7 +86,9 @@ S3 增量同步脱敏 trace。同步 checkpoint 只保存在 `sentry/.runtime/`�
 生成的 `._*` AppleDouble 文件，避免 Docker BuildKit 的 `failed to xattr`
 错误。Sentry 的公开镜像默认通过项目内无凭证 Docker 配置拉取，避免新版
 Docker Desktop 凭证助手卡住；需要私有镜像凭证时可设置
-`SENTRY_DOCKER_CONFIG` 指向其他 Docker 配置目录。
+`SENTRY_DOCKER_CONFIG` 指向其他 Docker 配置目录。为避免 Docker Compose 5
+并发拉取多个 registry 时挂起，安装器会逐个检查并拉取固定版本镜像，再跳过
+Sentry 上游中冗余的聚合拉取步骤；失败镜像最多重试三次。
 
 ## AWS 部署
 
