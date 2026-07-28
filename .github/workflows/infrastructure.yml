@@ -264,13 +264,20 @@ jobs:
           registry="${AWS_ACCOUNT_ID:-$(
             aws sts get-caller-identity --query Account --output text
           )}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          aws ecr get-login-password |
-            docker login --username AWS --password-stdin "${registry}"
-          docker build \
-            --tag "${registry}/${repository}:${GITHUB_SHA}" \
-            apps/performance/cleaner
-          docker push "${registry}/${repository}:${GITHUB_SHA}"
-          echo "PERFORMANCE_CLEANER_IMAGE=${registry}/${repository}:${GITHUB_SHA}" >> "${GITHUB_ENV}"
+          image="${registry}/${repository}:${GITHUB_SHA}"
+          if aws ecr describe-images \
+              --repository-name "${repository}" \
+              --image-ids "imageTag=${GITHUB_SHA}" >/dev/null 2>&1; then
+            echo "Reusing immutable performance cleaner image ${image}"
+          else
+            aws ecr get-login-password |
+              docker login --username AWS --password-stdin "${registry}"
+            docker build \
+              --tag "${image}" \
+              apps/performance/cleaner
+            docker push "${image}"
+          fi
+          echo "PERFORMANCE_CLEANER_IMAGE=${image}" >> "${GITHUB_ENV}"
 
       - name: Update runtime while preserving application artifacts
         run: |
