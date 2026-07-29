@@ -70,6 +70,8 @@ jobs:
       AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::688674375825:role/gh-actions-deploy' }}
       RUNTIME_STACK: customer-ops-production-runtime
       VITE_CHAT_API_BASE_URL: /model-api
+      VITE_APP_ENVIRONMENT: production
+      VITE_APP_RELEASE: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6

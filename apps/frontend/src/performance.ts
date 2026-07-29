@@ -8,7 +8,12 @@ import { getModelApiBaseURL } from "./apis/runtime";
 
 export const browserPerformance = new PerformanceClient({
   service: "browser",
-  environment: import.meta.env.MODE === "production" ? "production" : "local",
+  // 自定义构建脚本使用 Vite mode=prod，而不是 Vite 内置的 production。
+  // 只判断 MODE === "production" 会把线上浏览器事件错误标成 local，进而被
+  // production 查询和 S3 分区过滤掉。部署工作流会显式注入环境；prod 判断是
+  // 本地执行 production build 时的安全后备。
+  environment: import.meta.env.VITE_APP_ENVIRONMENT
+    || (["prod", "production"].includes(import.meta.env.MODE) ? "production" : "local"),
   release: import.meta.env.VITE_APP_RELEASE || "development",
   sampleRate: 0.1,
   autoFlush: typeof window !== "undefined",
