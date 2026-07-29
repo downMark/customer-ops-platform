@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { AuthSession } from "apis/model/auth";
 import Icon from "components/Icon";
+import { diagnosticsEnabled } from "../../diagnostics";
 
 const items = [
   { to: "/chat", icon: "forum", label: "客服聊天" },
@@ -8,6 +9,10 @@ const items = [
   { to: "/addOrder", icon: "add_box", label: "添加订单" },
   { to: "/products", icon: "database", label: "商品管理" },
   { to: "/operations", icon: "monitor_heart", label: "运行状态" },
+  // 与路由注册保持同一开关：生产环境既没有这条路由，也不显示入口。
+  ...(diagnosticsEnabled
+    ? [{ to: "/diagnostics", icon: "biotech", label: "可观测性自检" }]
+    : []),
 ];
 
 const displayRole = (role: string) =>

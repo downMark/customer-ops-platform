@@ -60,8 +60,9 @@ export function observeWebVitals() {
   installLifecycleFlush();
 }
 
-function reportVitals() {
-  if (vitalsReported) return;
+// force 只给开发态的探针用：正常链路一个页面只上报一次终值。
+export function reportVitals(force = false) {
+  if (vitalsReported && !force) return;
   const measurements = Object.fromEntries(
     Object.entries(vitals).filter(([, value]) => Number.isFinite(value)),
   );

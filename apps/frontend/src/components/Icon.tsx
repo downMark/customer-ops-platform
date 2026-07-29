@@ -91,6 +91,55 @@ const icons: Record<string, ReactNode> = {
       <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
     </>
   ),
+  // 以下为可观测性相关图标。SideNav 的 monitor_heart 之前不在表内，
+  // 一直静默回退成 support_agent，这里一并补上。
+  monitor_heart: (
+    <>
+      <rect x="3" y="4" width="18" height="14" rx="2" />
+      <path d="M6 11h3l1.5-3 2 6 1.5-3h4" />
+    </>
+  ),
+  biotech: (
+    <>
+      <path d="M10 3v6a3 3 0 0 0 .6 1.8L7 16a3 3 0 0 0 2.4 4.8h5.2A3 3 0 0 0 17 16l-3.6-5.2A3 3 0 0 0 14 9V3" />
+      <path d="M9 3h6M8.5 14h7" />
+    </>
+  ),
+  error: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v6" />
+      <circle cx="12" cy="16.5" r="0.6" />
+    </>
+  ),
+  warning: (
+    <>
+      <path d="M12 4 2.8 19.5h18.4L12 4Z" />
+      <path d="M12 10v4" />
+      <circle cx="12" cy="17" r="0.6" />
+    </>
+  ),
+  broken_image: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 14l4-3 3 2.5" />
+      <path d="M14 19l1.5-4 2 2 3.5-3" />
+    </>
+  ),
+  cloud_off: (
+    <>
+      <path d="M7 18h10a4 4 0 0 0 1.2-7.8A6 6 0 0 0 8.4 7.6" />
+      <path d="M7 18a4 4 0 0 1-.6-8" />
+      <path d="M3 3l18 18" />
+    </>
+  ),
+  speed: (
+    <>
+      <path d="M4 18a9 9 0 1 1 16 0" />
+      <path d="M12 14l4-4" />
+      <circle cx="12" cy="15" r="1.2" />
+    </>
+  ),
 };
 
 /** 本地 SVG 图标，不依赖外部字体或网络资源。 */
