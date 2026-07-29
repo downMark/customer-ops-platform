@@ -136,6 +136,9 @@ jobs:
         env:
           VITE_API_BASE_URL: /backend-api
           VITE_CHAT_API_BASE_URL: /model-api
+          # 可观测性自检页会往真实链路灌人造错误，生产开启后这些事件会进入
+          # Sentry issue 与 DynamoDB 聚合指标。需要关闭时把这里改回 false 重新部署。
+          VITE_ENABLE_DIAGNOSTICS: ${{ vars.ENABLE_DIAGNOSTICS || 'true' }}
         run: pnpm build:worker
 
       - name: Deploy Worker

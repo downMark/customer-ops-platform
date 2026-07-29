@@ -157,14 +157,24 @@ export class PerformanceClient {
     }));
   }
 
-  captureError(operation: string, error: unknown, context?: TraceContext, code?: string) {
+  captureError(
+    operation: string,
+    error: unknown,
+    context?: TraceContext,
+    code?: string,
+    attributes: SafeAttributes = {},
+  ) {
     const errorType = error instanceof Error ? error.name : "UnknownError";
     const fingerprint = stableFingerprint(`${operation}:${errorType}:${code ?? ""}`);
     this.enqueue(this.event({
       eventType: "error", operation, status: "error",
       traceId: context?.traceId ?? hex(16), spanId: hex(8),
       parentSpanId: context?.spanId ?? null, sampled: true, measurements: {},
-      attributes: { errorType, errorCode: code?.slice(0, 64), errorFingerprint: fingerprint },
+      // 调用方附加的属性放在前面：errorType/errorFingerprint 是本方法的产出，不可被覆盖。
+      attributes: {
+        ...attributes,
+        errorType, errorCode: code?.slice(0, 64), errorFingerprint: fingerprint,
+      },
     }));
   }
 

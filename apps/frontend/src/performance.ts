@@ -89,6 +89,24 @@ export function installLifecycleFlush() {
   });
 }
 
+// 自检页产生的事件走的是和真实错误完全相同的代码路径，在 Sentry 里本来无法区分。
+// 生产环境开放自检后这会污染 issue 列表和告警，所以在自检触发前后的短窗口内，
+// 给捕获到的错误打上 component=diagnostics —— 该字段会被同步器映射成 Sentry tag，
+// 可以直接用 !component:diagnostics 从查询和告警条件里排除。
+//
+// 用时间窗而不是显式传参，是因为未捕获异常和资源错误由浏览器异步派发给全局监听器，
+// 中间没有可以透传标记的调用链。代价是窗口内偶发的真实错误也会被标记，
+// 考虑到窗口只有几秒且用户正停在自检页上，这个误标概率可以接受。
+let diagnosticsUntil = 0;
+
+export function markDiagnostics(windowMs = 4_000) {
+  diagnosticsUntil = Date.now() + windowMs;
+}
+
+function diagnosticsAttributes() {
+  return Date.now() <= diagnosticsUntil ? { component: "diagnostics" } : {};
+}
+
 // 全局错误捕获。之前只有 performanceFetch 的 catch 和 Chat 的 SSE 分支会上报，
 // 控制台里的未捕获异常、未处理的 Promise 拒绝、资源加载失败一条都没进链路。
 // React 19 对未捕获的渲染错误会走 reportError()，同样触发 window 的 error 事件，
@@ -105,7 +123,9 @@ export function installErrorReporting() {
       const resourceError = new Error(tagName);
       resourceError.name = "ResourceLoadError";
       // 只带标签名，不带 src/href：资源地址可能含查询参数，属于不可外传的输入。
-      browserPerformance.captureError("browser.resource", resourceError, undefined, tagName);
+      browserPerformance.captureError(
+        "browser.resource", resourceError, undefined, tagName, diagnosticsAttributes(),
+      );
       return;
     }
     browserPerformance.captureError(
@@ -114,11 +134,15 @@ export function installErrorReporting() {
       undefined,
       // 文件名 + 行号让同类错误能聚成一个 issue；只取 basename 且去掉查询串。
       locationCode(event.filename, event.lineno),
+      diagnosticsAttributes(),
     );
   }, true);
 
   window.addEventListener("unhandledrejection", (event) => {
-    browserPerformance.captureError("browser.unhandled_rejection", toError(event.reason));
+    browserPerformance.captureError(
+      "browser.unhandled_rejection", toError(event.reason), undefined, undefined,
+      diagnosticsAttributes(),
+    );
   });
 
   installLifecycleFlush();
@@ -162,7 +186,9 @@ export async function performanceFetch(
   } catch (error) {
     span.finish(error instanceof Error && error.name === "AbortError"
       ? "cancelled" : "error");
-    browserPerformance.captureError("api.request", error, span.context);
+    browserPerformance.captureError(
+      "api.request", error, span.context, undefined, diagnosticsAttributes(),
+    );
     throw error;
   }
 }

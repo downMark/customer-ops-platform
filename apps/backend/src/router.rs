@@ -79,6 +79,10 @@ fn build_base_router(state: AppState) -> Router {
             "/api/ops/failure-tests/{test_id}/recover",
             post(handler::operations::recover_failure_test),
         )
+        .route(
+            "/api/diagnostics/errors",
+            post(handler::diagnostics::trigger_error),
+        )
         .route("/api/health", get(handler::health::health))
         .layer(axum::middleware::from_fn(handler::middleware::trace_id))
         .layer(TraceLayer::new_for_http())
@@ -513,6 +517,51 @@ mod tests {
             .unwrap();
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         assert_eq!(json_body(accepted).await["data"]["testId"], "test-drill-1");
+    }
+
+    #[tokio::test]
+    async fn error_drill_requires_admin_and_maps_each_kind_to_a_real_failure() {
+        let request = |token: &str, kind: &str, confirmation: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/diagnostics/errors")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"kind": kind, "confirmation": confirmation}).to_string(),
+                ))
+                .unwrap()
+        };
+
+        let forbidden = test_router()
+            .oneshot(request("valid-token", "not_found", "TRIGGER_ERROR_DRILL"))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let unconfirmed = test_router()
+            .oneshot(request("admin-token", "not_found", "TRIGGER"))
+            .await
+            .unwrap();
+        assert_eq!(unconfirmed.status(), StatusCode::BAD_REQUEST);
+
+        // 演练必须产出真实形态的失败响应，前端自检页才能观察到与线上一致的表现。
+        for (kind, expected) in [
+            ("not_found", StatusCode::NOT_FOUND),
+            ("service_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+            ("timeout", StatusCode::SERVICE_UNAVAILABLE),
+            ("internal", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let response = test_router()
+                .oneshot(request("admin-token", kind, "TRIGGER_ERROR_DRILL"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "kind={kind}");
+            let body = json_body(response).await;
+            assert_eq!(body["success"], false);
+            // 失败文案不得泄露内部细节。
+            assert!(body["data"].is_null());
+        }
     }
 
     #[tokio::test]

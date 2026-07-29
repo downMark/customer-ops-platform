@@ -11,8 +11,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import DiagnosticsService, { type DiagnosticsKind } from "apis/services/Diagnostics";
 import {
   browserPerformance,
+  markDiagnostics,
   performanceFetch,
   reportVitals,
 } from "../../performance";
@@ -24,14 +26,48 @@ interface Probe {
   /** 触发后预期进入链路的事件，用于和下游对照。 */
   expects: string;
   description: string;
-  run: () => void | Promise<void>;
+  /** 返回值会追加到触发记录里，用于展示后端的真实响应。 */
+  run: () => void | Promise<string | void>;
 }
 
 interface LogEntry {
   at: string;
+  scope: "browser" | "backend";
   label: string;
   expects: string;
+  result?: string;
 }
+
+const backendProbes: { kind: DiagnosticsKind; label: string; icon: string; description: string; expects: string }[] = [
+  {
+    kind: "not_found",
+    label: "订单不存在",
+    icon: "search",
+    description: "业务侧可预期的失败，后端返回 404。",
+    expects: "diagnostics.not_found · DiagnosticsNotFound",
+  },
+  {
+    kind: "service_unavailable",
+    label: "订单服务不可用",
+    icon: "cloud_off",
+    description: "模拟数据库/上游不可用，后端返回 503。",
+    expects: "diagnostics.service_unavailable · DiagnosticsServiceUnavailable",
+  },
+  {
+    kind: "timeout",
+    label: "上游超时",
+    icon: "warning",
+    description: "模拟上游超时，后端同样返回 503 且不猜测订单状态。",
+    expects: "diagnostics.timeout · DiagnosticsUpstreamTimeout",
+  },
+  {
+    kind: "internal",
+    label: "未预期内部错误",
+    icon: "error",
+    description: "模拟未捕获的内部错误，后端返回 500，细节只进服务端日志。",
+    expects: "diagnostics.internal · DiagnosticsInternalError",
+  },
+];
 
 const probes: Probe[] = [
   {
@@ -106,22 +142,52 @@ const Diagnostics = () => {
     setHasToken(Boolean(AuthService.getAccessToken()));
   }, []);
 
+  const append = (entry: Omit<LogEntry, "at">) =>
+    setLog((entries) =>
+      [{ at: new Date().toLocaleTimeString("zh-CN"), ...entry }, ...entries].slice(0, 30),
+    );
+
   const trigger = async (probe: Probe) => {
-    await probe.run();
-    setLog((entries) => [
-      { at: new Date().toLocaleTimeString("zh-CN"), label: probe.label, expects: probe.expects },
-      ...entries,
-    ].slice(0, 30));
+    // 打开标记窗口，让这次触发产生的错误带上 component=diagnostics，
+    // 便于在 Sentry 里把人造事件和真实故障分开。
+    markDiagnostics();
+    const result = await probe.run();
+    append({
+      scope: "browser",
+      label: probe.label,
+      expects: probe.expects,
+      ...(typeof result === "string" ? { result } : {}),
+    });
+  };
+
+  const triggerBackend = async (probe: (typeof backendProbes)[number]) => {
+    try {
+      const result = await DiagnosticsService.triggerError(probe.kind);
+      append({
+        scope: "backend",
+        label: probe.label,
+        expects: probe.expects,
+        result: `HTTP ${result.status} · code ${result.code ?? "—"} · ${result.msg}`,
+      });
+    } catch (error) {
+      append({
+        scope: "backend",
+        label: probe.label,
+        expects: probe.expects,
+        result: error instanceof Error ? error.message : "请求失败",
+      });
+    }
   };
 
   const flush = async () => {
     setFlushing(true);
     try {
       await browserPerformance.flush();
-      setLog((entries) => [
-        { at: new Date().toLocaleTimeString("zh-CN"), label: "手动刷新队列", expects: "POST /api/telemetry/v1/batch" },
-        ...entries,
-      ].slice(0, 30));
+      append({
+        scope: "browser",
+        label: "手动刷新队列",
+        expects: "POST /api/telemetry/v1/batch",
+      });
     } finally {
       setFlushing(false);
     }
@@ -150,6 +216,14 @@ const Diagnostics = () => {
         </Alert>
       )}
 
+      <h2 className="flex items-center gap-2 text-lg font-bold text-on-surface">
+        <Icon name="forum" className="text-primary" />
+        浏览器侧
+        <span className="text-sm font-normal text-on-surface-variant">
+          service = browser
+        </span>
+      </h2>
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {probes.map((probe) => (
           <Card key={probe.id} className="flex flex-col">
@@ -177,6 +251,41 @@ const Diagnostics = () => {
         ))}
       </div>
 
+      <h2 className="flex items-center gap-2 pt-2 text-lg font-bold text-on-surface">
+        <Icon name="database" className="text-primary" />
+        后端侧
+        <span className="text-sm font-normal text-on-surface-variant">
+          service = backend · 仅管理员
+        </span>
+      </h2>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {backendProbes.map((probe) => (
+          <Card key={probe.kind} className="flex flex-col">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Icon name={probe.icon} className="text-primary" />
+                {probe.label}
+              </CardTitle>
+              <CardDescription>{probe.description}</CardDescription>
+            </CardHeader>
+            <CardContent className="mt-auto space-y-3">
+              <p className="text-xs text-on-surface-variant">
+                预期事件：<code className="font-mono">{probe.expects}</code>
+              </p>
+              <Button
+                type="button"
+                className="w-full"
+                variant="outline"
+                onClick={() => void triggerBackend(probe)}
+              >
+                触发
+              </Button>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
           <div>
@@ -193,12 +302,20 @@ const Diagnostics = () => {
           {log.length ? (
             <ul className="divide-y divide-outline-variant text-sm">
               {log.map((entry, index) => (
-                <li key={`${entry.at}-${index}`} className="flex items-center gap-3 py-2">
+                <li key={`${entry.at}-${index}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
                   <span className="font-mono text-xs text-on-surface-variant">{entry.at}</span>
+                  <Badge variant={entry.scope === "backend" ? "default" : "secondary"}>
+                    {entry.scope === "backend" ? "backend" : "browser"}
+                  </Badge>
                   <span className="font-semibold text-on-surface">{entry.label}</span>
                   <code className="ml-auto font-mono text-xs text-on-surface-variant">
                     {entry.expects}
                   </code>
+                  {entry.result && (
+                    <code className="w-full font-mono text-xs text-on-surface-variant lg:w-auto lg:basis-full lg:pl-16">
+                      ↳ {entry.result}
+                    </code>
+                  )}
                 </li>
               ))}
             </ul>

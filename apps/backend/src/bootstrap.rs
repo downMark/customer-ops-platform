@@ -62,7 +62,10 @@ pub(crate) async fn build_state(config: &Config) -> Result<AppState, StartupErro
     })
 }
 
-async fn build_operations(config: &Config) -> Arc<dyn Operations> {
+// config 只在 ops feature 下被读取，默认构建时用 `_` 前缀避免 unused_variables。
+async fn build_operations(
+    #[cfg_attr(not(feature = "ops"), allow(unused_variables))] config: &Config,
+) -> Arc<dyn Operations> {
     #[cfg(feature = "ops")]
     if let Some(operations) = crate::infra::operations::AwsOperations::from_env(config).await {
         return Arc::new(operations);

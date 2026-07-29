@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod conversations;
+pub mod diagnostics;
 pub mod health;
 pub mod knowledge;
 pub mod middleware;

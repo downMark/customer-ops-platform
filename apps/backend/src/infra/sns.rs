@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 
 use crate::domain::event::{ConversationCompleted, EventPublisher, PublishError};
+// 仅 SnsPublisher（sns feature）用到；不加条件时默认构建会报 unused_imports。
+#[cfg(feature = "sns")]
 use crate::performance;
 
 /// 生产用 SNS 发布器。仅在启用 `sns` feature 时编译。
