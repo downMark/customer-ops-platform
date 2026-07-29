@@ -91,9 +91,27 @@ h2 em { color: #46f5ac; font-style: normal; }
 .trace-track { height: 18px; border-left: 1px solid #365d4e; border-right: 1px solid #365d4e; position: relative; background: repeating-linear-gradient(90deg, transparent 0, transparent 24%, rgba(50,87,73,.24) 25%); }
 .trace-track i { position: absolute; top: 4px; height: 10px; min-width: 3px; background: #46f5ac; box-shadow: 0 0 10px rgba(70,245,172,.25); }
 .trace-track i.failed { background: #ff725c; }
+.issue-panel { margin-top: 20px; min-height: 200px; }
+.issue-panel > .panel-title > code { color: #638276; font: 10px DM Mono; }
+.issue-list { display: grid; gap: 10px; margin-top: 24px; }
+.issue-row { display: grid; grid-template-columns: 1fr 280px 96px; align-items: center; gap: 16px; padding: 12px 14px; background: #0a1814; border-left: 2px solid #55b9dd; }
+.issue-row.warning { border-color: #f4b860; }
+.issue-row.error, .issue-row.fatal { border-color: #ff725c; }
+.issue-main { min-width: 0; display: grid; gap: 4px; }
+.issue-main strong, .issue-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue-main strong { font-size: 13px; color: #d9e8e2; }
+.issue-main span { color: #648477; font: 10px DM Mono; }
+.issue-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.issue-meta div { display: grid; gap: 3px; }
+.issue-meta span { color: #567568; font-size: 10px; }
+.issue-meta b { font: 500 13px DM Mono; }
+.issue-link { color: #46f5ac; font: 10px DM Mono; text-align: right; text-decoration: none; }
+.issue-link:hover { text-decoration: underline; }
+.issue-row > code { color: #638276; font: 10px DM Mono; text-align: right; }
 @media (max-width: 980px) {
   .hero-grid, .content-grid { grid-template-columns: 1fr; }
   .kpis { grid-template-columns: repeat(2, 1fr); }
+  .issue-row { grid-template-columns: 1fr 220px 80px; }
 }
 @media (max-width: 640px) {
   .shell { grid-template-columns: 1fr; }
@@ -107,4 +125,6 @@ h2 em { color: #46f5ac; font-style: normal; }
   .gpu-stats div { border: 0; }
   .trace-row { grid-template-columns: 120px 1fr 54px; }
   .trace-row > div:first-child { grid-template-columns: 1fr; }
+  .issue-row { grid-template-columns: 1fr; gap: 10px; }
+  .issue-link, .issue-row > code { text-align: left; }
 }

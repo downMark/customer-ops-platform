@@ -11,13 +11,19 @@
 
 ```text
 SDK -> CloudWatch Logs -> Kinesis -> ECS cleaner
-    -> DynamoDB minute aggregates
-    -> S3 sanitized details
-    -> local console and local Sentry
-    -> local Kimi K3 AIOps analysis (aggregates only)
+    -> DynamoDB minute aggregates ─┐
+    -> S3 sanitized details ───────┼─> local console (指标 / trace / AIOps)
+                                   └─> sync.mjs -> local Sentry (issue 聚合 / 告警)
+                                                      └─> console 读回 issue 面板
 ```
 
 Console 与 Sentry 仅绑定 `127.0.0.1`，不加入任何云端发布工作流。
+
+界面统一在 Console，不改 Sentry 前端。**性能指标与 trace 由 Console 直读
+DynamoDB / S3**，不绕经 Sentry；Sentry 只负责它独有的能力（issue 聚合、等级、
+影响面），Console 通过只读 Auth Token 调 `/api/0/projects/{org}/{project}/issues/`
+读回来渲染成「错误聚合与告警」面板。未配置或 Sentry 未启动时该面板显示
+「未接入」，其余面板不受影响。
 
 ## 本地运行
 
@@ -90,7 +96,22 @@ Docker Desktop 凭证助手卡住；需要私有镜像凭证时可设置
 并发拉取多个 registry 时挂起，安装器会逐个检查并拉取固定版本镜像，再跳过
 Sentry 上游中冗余的聚合拉取步骤；失败镜像最多重试三次。
 
-## AWS 部署
+### 把 issue 接进 Console
+
+Sentry 起来后，在 Settings → Account → API → Auth Tokens 创建一个只带
+`project:read` 的 token，填进 `console/.env`：
+
+```bash
+SENTRY_BASE_URL=http://127.0.0.1:9000
+SENTRY_AUTH_TOKEN=<只读 token>
+SENTRY_ORG=<组织 slug>
+SENTRY_PROJECT=<项目 slug>
+```
+
+重启 Console 后「错误聚合与告警」面板生效。Token 只保存在本地 `console/.env`，
+仅在服务端使用，不会下发到浏览器；Sentry 返回的 `permalink` 按不可信输入处理，
+只放行 `http(s)`。四个变量任缺其一即视为未接入，面板安静降级，不影响指标与
+trace 面板。
 
 CloudFormation 创建 Kinesis、DynamoDB、S3、ECR、最小权限角色和单副本
 Fargate cleaner。Infrastructure 工作流先更新 foundation、构建 cleaner 镜像，

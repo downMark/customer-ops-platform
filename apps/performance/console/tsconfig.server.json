@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "esModuleInterop": true
   },
-  "include": ["src/server.ts", "src/metrics.ts"]
+  "include": ["src/server.ts", "src/metrics.ts", "src/sentry.ts"]
 }

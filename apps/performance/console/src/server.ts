@@ -12,6 +12,7 @@ import {
 import { gunzipSync } from "node:zlib";
 import { analyzePerformance, type AggregateMetric } from "@customer-ops/aiops-agent";
 import { demoMetrics, normalizeMetric } from "./metrics.js";
+import { demoIssues, loadIssues, sentryConfigured } from "./sentry.js";
 
 const app = express();
 const host = "127.0.0.1";
@@ -89,6 +90,7 @@ app.get("/api/health", async (_request, response) => {
     ...(awsError ? { awsError } : {}),
     environment,
     kimiConfigured: Boolean(process.env.MOONSHOT_API_KEY),
+    sentryConfigured,
     readOnly: true,
   });
 });
@@ -140,6 +142,22 @@ app.get("/api/traces", async (_request, response) => {
     response.json({ traces: traces.slice(0, 100) });
   } catch (error) {
     response.status(503).json({ message: "Trace details are unavailable", errorType: error instanceof Error ? error.name : "Error" });
+  }
+});
+
+// Sentry 只做 issue/告警，性能指标不走这里；未配置时安静降级，不影响其余面板。
+app.get("/api/issues", async (_request, response) => {
+  if (demo) {
+    return response.json({ configured: sentryConfigured, issues: demoIssues() });
+  }
+  if (!sentryConfigured) {
+    return response.json({ configured: false, issues: [] });
+  }
+  try {
+    const issues = await loadIssues();
+    response.json({ configured: true, issues, refreshedAt: new Date().toISOString() });
+  } catch (error) {
+    response.status(503).json({ message: "Sentry issues are unavailable", errorType: error instanceof Error ? error.name : "Error" });
   }
 });
 

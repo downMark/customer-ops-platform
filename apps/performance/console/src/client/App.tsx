@@ -17,13 +17,28 @@ type Report = {
   generatedAt: string; model: string; summary: string; source: string;
   findings: Array<{ severity: string; title: string; evidence: string[]; recommendation: string; confidence: number }>;
 };
+type Issue = {
+  id: string; shortId: string; title: string; culprit: string;
+  level: string; status: string; count: number; userCount: number;
+  firstSeen: string; lastSeen: string; permalink?: string;
+};
 
 const formatMs = (value: number) => value >= 1_000 ? `${(value / 1_000).toFixed(1)}s` : `${Math.round(value)}ms`;
 const formatBytes = (value: number) => `${(value / 1024 ** 3).toFixed(1)} GB`;
+const formatSince = (value: string) => {
+  const elapsed = Date.now() - Date.parse(value);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return "—";
+  if (elapsed < 60_000) return "刚刚";
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m 前`;
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h 前`;
+  return `${Math.floor(elapsed / 86_400_000)}d 前`;
+};
 
 export function App() {
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [sentryConfigured, setSentryConfigured] = useState(false);
   const [mode, setMode] = useState("loading");
   const [awsConnected, setAwsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState("");
@@ -33,16 +48,20 @@ export function App() {
   const [release, setRelease] = useState("all");
 
   const refresh = async () => {
-    const [health, data, traceData] = await Promise.all([
+    const [health, data, traceData, issueData] = await Promise.all([
       fetch("/api/health").then((response) => response.json()),
       fetch("/api/metrics").then((response) => response.json()),
       fetch("/api/traces").then((response) => response.json()),
+      fetch("/api/issues").then((response) => response.json()),
     ]);
     setMode(health.mode);
     setAwsConnected(Boolean(health.awsConnected));
     setConnectionError(health.awsError ?? "");
     setMetrics(data.metrics ?? []);
     setTraces(traceData.traces ?? []);
+    // Sentry 不可用时后端返回 503 体，这里按空列表处理，不阻塞其余面板。
+    setIssues(issueData.issues ?? []);
+    setSentryConfigured(Boolean(issueData.configured ?? health.sentryConfigured));
   };
   useEffect(() => { void refresh(); }, []);
 
@@ -232,6 +251,39 @@ export function App() {
               })}
             </div>
           ) : <div className="empty">当前小时没有脱敏 trace 明细；聚合指标仍可正常查看。</div>}
+        </section>
+
+        <section className="panel issue-panel">
+          <div className="panel-title">
+            <div><span>SENTRY · ISSUES</span><h3>错误聚合与告警</h3></div>
+            <code>{sentryConfigured ? `${issues.length} 个未解决 · 24h` : "未接入"}</code>
+          </div>
+          {issues.length ? (
+            <div className="issue-list">
+              {issues.map((item) => (
+                <div className={`issue-row ${item.level}`} key={item.id}>
+                  <div className="issue-main">
+                    <strong>{item.title}</strong>
+                    <span>{item.culprit}</span>
+                  </div>
+                  <div className="issue-meta">
+                    <div><span>事件</span><b>{item.count.toLocaleString()}</b></div>
+                    <div><span>影响用户</span><b>{item.userCount.toLocaleString()}</b></div>
+                    <div><span>最近</span><b>{formatSince(item.lastSeen)}</b></div>
+                  </div>
+                  {item.permalink
+                    ? <a className="issue-link" href={item.permalink} target="_blank" rel="noreferrer noopener">{item.shortId} ↗</a>
+                    : <code>{item.shortId}</code>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty">
+              {sentryConfigured
+                ? "过去 24 小时没有未解决的 issue。"
+                : "未接入 Sentry；在 console/.env 配置 SENTRY_BASE_URL、SENTRY_AUTH_TOKEN、SENTRY_ORG、SENTRY_PROJECT 后显示错误聚合。"}
+            </div>
+          )}
         </section>
       </main>
     </div>

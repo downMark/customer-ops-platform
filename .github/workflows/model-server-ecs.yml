@@ -180,6 +180,15 @@ jobs:
           cache-from: type=gha,scope=model-server-${{ inputs.image_variant }}
           cache-to: type=gha,mode=max,scope=model-server-${{ inputs.image_variant }}
 
+      - name: Smoke test packaged Python runtime
+        run: |
+          image="${{ steps.ecr.outputs.registry }}/${{ steps.resources.outputs.ecr_repository }}:${GITHUB_SHA}-${{ inputs.image_variant }}"
+          docker pull "${image}"
+          docker run --rm \
+            --entrypoint python3 \
+            "${image}" \
+            -c 'import fastapi, numpy, onnxruntime, tokenizers, uvicorn'
+
       - name: Render image into task definition
         id: task
         uses: aws-actions/amazon-ecs-render-task-definition@v1
