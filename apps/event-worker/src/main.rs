@@ -121,6 +121,8 @@ impl Worker {
         self.performance
             .record_metric("sqs.batch.result", measurements);
         batch_span.finish(if failed > 0 { "error" } else { "ok" });
+        // The Lambda runtime may freeze immediately after this future resolves.
+        self.performance.flush();
         BatchResponse {
             batch_item_failures: failures,
         }

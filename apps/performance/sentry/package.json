@@ -6,6 +6,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "sync": "node --env-file-if-exists=.env sync.mjs",
+    "tail": "node --env-file-if-exists=.env tail-to-sentry.mjs",
     "test": "node --test *.test.mjs"
   },
   "dependencies": {

@@ -101,6 +101,19 @@ breadcrumbs 附上。正常 span 不进 Sentry——访问日志与延迟分布�
 实测均 404），且 OTLP 会落到 `errors-only` 已裁掉的 span/transaction 管道。
 事件复用上游 `eventId` 作为 Sentry `event_id`，重投递由 Sentry 去重。
 同步 checkpoint 只保存在 `sentry/.runtime/`。
+
+本地运行的服务不会经过 CloudWatch。需要立即验证本地错误分组时，把服务的
+stdout 接到专用桥接器；桥接器忽略普通日志和正常 span，只把失败事件发送到
+上述 DSN：
+
+```bash
+cd apps/backend
+cargo run --features ops 2>&1 | pnpm --dir ../performance/sentry tail
+```
+
+如果服务已经把日志写到文件，也可以在仓库根目录使用
+`tail -F /tmp/backend.log | pnpm --dir apps/performance/sentry tail`。桥接只供
+本地开发使用，不加入 AWS 部署链路。
 如果仓库位于 exFAT 等外接 macOS 磁盘，安装器会在构建前自动清理由扩展属性
 生成的 `._*` AppleDouble 文件，避免 Docker BuildKit 的 `failed to xattr`
 错误。Sentry 的公开镜像默认通过项目内无凭证 Docker 配置拉取，避免新版

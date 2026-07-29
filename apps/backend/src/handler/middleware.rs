@@ -84,6 +84,10 @@ pub async fn trace_id(mut request: Request<axum::body::Body>, next: Next) -> Res
     } else {
         "error"
     });
+    // Lambda freezes the execution environment as soon as the response is returned.
+    // Drain the SDK worker first so error events reach CloudWatch Logs reliably.
+    #[cfg(feature = "lambda")]
+    performance::client().flush();
 
     if let Ok(value) = HeaderValue::from_str(&trace_id) {
         response.headers_mut().insert(TRACE_ID_HEADER, value);
