@@ -17,6 +17,14 @@ export const browserPerformance = new PerformanceClient({
   ),
 });
 
+// Web Vitals 是「一个页面一个终值」的指标，不是流式样本。原实现在每次观测回调里
+// 都 recordMetric：LCP 每出现一个候选、CLS 每发生一次偏移都会产出一条事件，于是
+// DynamoDB 聚合的 sampleCount 把中间态也算进去，console 用 总和/样本数 求出来的
+// 是「中间值的平均」而不是最终 LCP —— 指标本身是错的，顺带还放大了上报量。
+// 改为：观测期间只在内存里收敛，页面隐藏时一次性上报终值。
+const vitals: { lcpMs?: number; cls?: number; inpMs?: number; ttfbMs?: number } = {};
+let vitalsReported = false;
+
 export function observeWebVitals() {
   if (typeof PerformanceObserver === "undefined") return;
   const supported = PerformanceObserver.supportedEntryTypes;
@@ -24,34 +32,108 @@ export function observeWebVitals() {
     const observer = new PerformanceObserver((list) => {
       const entries = list.getEntries();
       const entry = entries[entries.length - 1];
-      if (entry) browserPerformance.recordMetric("web_vital.lcp", { lcpMs: entry.startTime });
+      if (entry) vitals.lcpMs = entry.startTime;
     });
     observer.observe({ type: "largest-contentful-paint", buffered: true });
   }
   if (supported.includes("layout-shift")) {
-    let cls = 0;
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         const shift = entry as PerformanceEntry & { value?: number; hadRecentInput?: boolean };
-        if (!shift.hadRecentInput) cls += shift.value ?? 0;
+        if (!shift.hadRecentInput) vitals.cls = (vitals.cls ?? 0) + (shift.value ?? 0);
       }
-      browserPerformance.recordMetric("web_vital.cls", { cls });
     });
     observer.observe({ type: "layout-shift", buffered: true });
   }
   if (supported.includes("event")) {
     const observer = new PerformanceObserver((list) => {
       const inp = Math.max(...list.getEntries().map((entry) => entry.duration), 0);
-      if (inp) browserPerformance.recordMetric("web_vital.inp", { inpMs: inp });
+      if (inp) vitals.inpMs = Math.max(vitals.inpMs ?? 0, inp);
     });
     observer.observe({ type: "event", buffered: true, durationThreshold: 40 } as PerformanceObserverInit);
   }
   const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
   if (navigation) {
-    browserPerformance.recordMetric("web_vital.ttfb", {
-      ttfbMs: navigation.responseStart - navigation.requestStart,
-    });
+    vitals.ttfbMs = navigation.responseStart - navigation.requestStart;
   }
+  installLifecycleFlush();
+}
+
+function reportVitals() {
+  if (vitalsReported) return;
+  const measurements = Object.fromEntries(
+    Object.entries(vitals).filter(([, value]) => Number.isFinite(value)),
+  );
+  if (!Object.keys(measurements).length) return;
+  vitalsReported = true;
+  browserPerformance.recordMetric("web_vital.page", measurements);
+}
+
+// 客户端队列默认 1s 刷一次，页面被关闭/切走时这一秒的事件（包括刚捕获的错误）
+// 会随页面一起丢掉。sink 已经用 keepalive: true，卸载期间的请求能发出去，
+// 但需要有人在这一刻触发 flush。
+let lifecycleInstalled = false;
+
+export function installLifecycleFlush() {
+  if (lifecycleInstalled || typeof window === "undefined") return;
+  lifecycleInstalled = true;
+  const drain = () => {
+    reportVitals();
+    void browserPerformance.flush();
+  };
+  window.addEventListener("pagehide", drain);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") drain();
+  });
+}
+
+// 全局错误捕获。之前只有 performanceFetch 的 catch 和 Chat 的 SSE 分支会上报，
+// 控制台里的未捕获异常、未处理的 Promise 拒绝、资源加载失败一条都没进链路。
+// React 19 对未捕获的渲染错误会走 reportError()，同样触发 window 的 error 事件，
+// 所以不额外加 ErrorBoundary 也能覆盖到。
+export function installErrorReporting() {
+  if (typeof window === "undefined") return;
+
+  window.addEventListener("error", (event) => {
+    const target = event.target;
+    // 资源加载失败（script/img/link）不冒泡到 window.onerror，只有捕获阶段能拿到，
+    // 且没有 Error 对象，只能靠 target 判定。
+    if (target && target !== window && target instanceof HTMLElement) {
+      const tagName = target.tagName.toLowerCase();
+      const resourceError = new Error(tagName);
+      resourceError.name = "ResourceLoadError";
+      // 只带标签名，不带 src/href：资源地址可能含查询参数，属于不可外传的输入。
+      browserPerformance.captureError("browser.resource", resourceError, undefined, tagName);
+      return;
+    }
+    browserPerformance.captureError(
+      "browser.uncaught",
+      event.error instanceof Error ? event.error : new Error(event.message),
+      undefined,
+      // 文件名 + 行号让同类错误能聚成一个 issue；只取 basename 且去掉查询串。
+      locationCode(event.filename, event.lineno),
+    );
+  }, true);
+
+  window.addEventListener("unhandledrejection", (event) => {
+    browserPerformance.captureError("browser.unhandled_rejection", toError(event.reason));
+  });
+
+  installLifecycleFlush();
+}
+
+function toError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  // 非 Error 的拒绝值（字符串、对象）也要有稳定的类型名，否则全部聚成 UnknownError。
+  const error = new Error("non-error rejection");
+  error.name = "UnhandledRejection";
+  return error;
+}
+
+function locationCode(filename?: string, line?: number): string | undefined {
+  if (!filename) return undefined;
+  const base = filename.split("?")[0].split("/").pop();
+  return base ? `${base}:${line ?? 0}`.slice(0, 64) : undefined;
 }
 
 export async function performanceFetch(

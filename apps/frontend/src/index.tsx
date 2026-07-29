@@ -5,9 +5,13 @@ import { KoaProvider } from "@app/utils/KoaContext";
 import { Context } from "koa";
 import "theme/index.less";
 import "./index.css";
-import { observeWebVitals } from "./performance";
+import { installErrorReporting, observeWebVitals } from "./performance";
 
-if (typeof window !== "undefined") observeWebVitals();
+if (typeof window !== "undefined") {
+  // 错误捕获要尽早装：装之前发生的未捕获异常收不到。
+  installErrorReporting();
+  observeWebVitals();
+}
 
 interface AppProps {
   context?: Context;

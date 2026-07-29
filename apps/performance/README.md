@@ -85,9 +85,22 @@ cd apps/performance/sentry
 ./health.sh
 ```
 
-安装器固定 Sentry self-hosted 26.5.1 并绑定 `127.0.0.1:9000`。在 Sentry
-创建本地项目后，将其 OTLP traces URL 写入环境变量，再运行 `pnpm sync` 从
-S3 增量同步脱敏 trace。同步 checkpoint 只保存在 `sentry/.runtime/`。
+安装器固定 Sentry self-hosted 26.5.1 并绑定 `127.0.0.1:9000`，并强制使用
+`errors-only` profile（31 个服务而非 72 个；feature-complete 常驻约 14 GiB，
+在 16 GiB 机器上 `web` 会被 OOM kill）。
+
+在 Sentry 创建项目后，把它的 **DSN** 写进 `sentry/.env` 的 `SENTRY_DSN`，
+再运行 `pnpm sync` 从 S3 增量同步。同步只转发**失败事件**
+（`eventType === "error"` 或 `status !== "ok"`）：每条转成一个 Sentry
+envelope，`service` 进 tag（据此在 Sentry 里分服务查看），SDK 算好的
+`errorFingerprint` 作为 issue 聚合键，同一 trace 上先于错误发生的 span 作为
+breadcrumbs 附上。正常 span 不进 Sentry——访问日志与延迟分布看 Console。
+
+不用 OTLP 的原因：本版本 Sentry 自托管没有 OTLP 摄入路由
+（`/api/0/integration/otlp/v1/traces` 与 relay 的 `/api/{id}/otlp/v1/traces`
+实测均 404），且 OTLP 会落到 `errors-only` 已裁掉的 span/transaction 管道。
+事件复用上游 `eventId` 作为 Sentry `event_id`，重投递由 Sentry 去重。
+同步 checkpoint 只保存在 `sentry/.runtime/`。
 如果仓库位于 exFAT 等外接 macOS 磁盘，安装器会在构建前自动清理由扩展属性
 生成的 `._*` AppleDouble 文件，避免 Docker BuildKit 的 `failed to xattr`
 错误。Sentry 的公开镜像默认通过项目内无凭证 Docker 配置拉取，避免新版

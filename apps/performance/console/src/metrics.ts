@@ -1,9 +1,15 @@
 import type { AggregateMetric } from "@customer-ops/aiops-agent";
 
+// 必须与 cleaner/src/events.ts 的 histogramBoundsMs 逐项一致：cleaner 把 duration
+// 记进 histogram_b{i}（i = 首个满足 value <= bound 的下标），超出最后一档时记进
+// 溢出桶 b{bounds.length}。以前这里多写了一个 600_000 充当第 18 档，实际它对应的
+// 是溢出桶而非真实边界——一旦 cleaner 增删边界，两边会静默错位且分位数全偏。
 const histogramBounds = [
   1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000,
-  10_000, 20_000, 60_000, 120_000, 300_000, 600_000,
+  10_000, 20_000, 60_000, 120_000, 300_000,
 ];
+// 溢出桶没有上界，展示时用最后一档的两倍近似（与既有口径一致）。
+const overflowApproximationMs = (histogramBounds.at(-1) ?? 0) * 2;
 
 export function normalizeMetric(item: Record<string, unknown>): AggregateMetric {
   const sampleCount = number(item.sampleCount);
@@ -31,11 +37,12 @@ function percentile(item: Record<string, unknown>, count: number, quantile: numb
   if (!count) return 0;
   const target = Math.ceil(count * quantile);
   let cumulative = 0;
-  for (let index = 0; index < histogramBounds.length; index++) {
+  // <= 而非 <：最后一轮读的是溢出桶 b{bounds.length}
+  for (let index = 0; index <= histogramBounds.length; index++) {
     cumulative += number(item[`histogram_b${index}`]);
-    if (cumulative >= target) return histogramBounds[index];
+    if (cumulative >= target) return histogramBounds[index] ?? overflowApproximationMs;
   }
-  return histogramBounds.at(-1) ?? 0;
+  return overflowApproximationMs;
 }
 
 function average(value: unknown, count: number) {

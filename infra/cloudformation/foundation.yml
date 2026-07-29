@@ -545,7 +545,9 @@ Resources:
             model_cache_uuid="$(blkid -s UUID -o value "${!model_cache_device}")"
             echo "UUID=${!model_cache_uuid} /mnt/model-cache xfs defaults,nofail 0 2" >> /etc/fstab
             chmod 0755 /mnt/model-cache
-            systemctl enable --now ecs
+            # ecs.service waits for cloud-init, while user data itself runs
+            # inside cloud-init. --no-block avoids that dependency deadlock.
+            systemctl enable --now --no-block ecs.service
 
             if dnf install -y amazon-cloudwatch-agent; then
               cat > /opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json <<'EOF'
@@ -584,11 +586,6 @@ Resources:
 
   GpuAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
-    UpdatePolicy:
-      AutoScalingRollingUpdate:
-        MaxBatchSize: 1
-        MinInstancesInService: 0
-        PauseTime: PT5M
     Properties:
       AutoScalingGroupName: !Sub customer-ops-${Environment}-gpu
       MinSize: "0"

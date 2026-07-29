@@ -5,7 +5,8 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "sync": "node sync.mjs"
+    "sync": "node --env-file-if-exists=.env sync.mjs",
+    "test": "node --test *.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.850.0"
