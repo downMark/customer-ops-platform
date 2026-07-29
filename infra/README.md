@@ -26,6 +26,12 @@ and offloads all supported Qwen layers through CUDA. The instance and model
 endpoint remain private; the instance has outbound internet access only so it
 can pull ECR images and S3 models without adding a NAT Gateway.
 
+The launch template formats and mounts the instance's local NVMe SSD at
+`/mnt/model-cache`. The ECS host volume maps that directory to `/models`, so
+failed task retries and later deployments reuse one model cache instead of
+creating a new multi-gigabyte Docker volume on the 50 GiB root disk. This cache
+is ephemeral and is repopulated from S3 whenever the GPU instance is replaced.
+
 The same task downloads `bge-m3-onnx` and `bge-reranker-v2-m3-onnx` from the
 `models/customer-ops/` prefix, verifies each directory's `SHA256SUMS`, and
 serves embedding/rerank through the existing private NLB. ONNX inference
@@ -75,6 +81,9 @@ canary lifecycle actions (`CreateCanary`, `GetCanary`, `GetCanaryRuns`,
 `UpdateCanary`, `DeleteCanary`, `StartCanary`, `StopCanary`, `TagResource`,
 `UntagResource`, and `ListTagsForResource`). GPU preflight additionally needs
 `servicequotas:GetServiceQuota` and `ec2:DescribeInstanceTypeOfferings`.
+Grant `cloudformation:CancelUpdateStack` as well: the workflow bounds foundation
+updates to 25 minutes and runtime updates to 45 minutes, then requests rollback
+instead of leaving a production stack indefinitely in `UPDATE_IN_PROGRESS`.
 
 ## GPU model-server rollout and rollback
 

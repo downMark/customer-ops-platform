@@ -612,6 +612,10 @@ Resources:
         Fn::ImportValue: !Sub customer-ops-${Environment}-model-server-task-role
       Volumes:
         - Name: model-cache
+          Host: !If
+            - UseGpuModelServer
+            - SourcePath: /mnt/model-cache
+            - !Ref AWS::NoValue
       ContainerDefinitions:
         - Name: model-server
           Image: !Ref ModelServerImageUri
@@ -709,6 +713,9 @@ Resources:
       DeploymentConfiguration:
         MinimumHealthyPercent: 0
         MaximumPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
       NetworkConfiguration: !If
         - UseGpuModelServer
         - !Ref AWS::NoValue

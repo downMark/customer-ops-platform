@@ -60,6 +60,7 @@ jobs:
     name: Deploy production
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     environment:
       name: production
     permissions:
@@ -91,6 +92,24 @@ jobs:
       - name: Discover deployment resources
         id: resources
         run: |
+          for stack in "${FOUNDATION_STACK}" "${RUNTIME_STACK}"; do
+            status="$(
+              aws cloudformation describe-stacks \
+                --stack-name "${stack}" \
+                --query 'Stacks[0].StackStatus' \
+                --output text
+            )"
+            case "${status}" in
+              CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+                echo "${stack}: ${status}"
+                ;;
+              *)
+                echo "::error::Stack ${stack} is not stable (${status}). Finish or cancel the infrastructure update before publishing a model image."
+                exit 1
+                ;;
+            esac
+          done
+
           stack_output() {
             local stack_name="$1"
             local output_key="$2"
@@ -189,6 +208,12 @@ jobs:
             "${image}" \
             -c 'import fastapi, numpy, onnxruntime, tokenizers, uvicorn'
 
+      - name: Refresh AWS credentials before ECS deployment
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Render image into task definition
         id: task
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -206,6 +231,7 @@ jobs:
           cluster: ${{ steps.resources.outputs.ecs_cluster }}
           service: ${{ steps.resources.outputs.ecs_service }}
           wait-for-service-stability: true
+          wait-max-delay-seconds: 15
 
       - name: Deployment summary
         run: |

@@ -518,6 +518,7 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             set -euxo pipefail
+            systemctl stop ecs || true
             cat >> /etc/ecs/ecs.config <<'EOF'
             ECS_CLUSTER=${EcsCluster}
             ECS_ENABLE_GPU_SUPPORT=true
@@ -525,8 +526,29 @@ Resources:
             ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
             EOF
 
-            dnf install -y amazon-cloudwatch-agent
-            cat > /opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json <<'EOF'
+            root_source="$(findmnt -n -o SOURCE /)"
+            root_disk="/dev/$(lsblk -no PKNAME "${!root_source}")"
+            model_cache_device="$(
+              lsblk -dpno NAME,TYPE \
+                | awk -v root="${!root_disk}" \
+                    '$2 == "disk" && $1 != root { print $1; exit }'
+            )"
+            if [ -z "${!model_cache_device}" ]; then
+              echo "No unmounted GPU instance-store device was found" >&2
+              exit 1
+            fi
+            if ! blkid "${!model_cache_device}" >/dev/null 2>&1; then
+              mkfs.xfs -f "${!model_cache_device}"
+            fi
+            mkdir -p /mnt/model-cache
+            mount "${!model_cache_device}" /mnt/model-cache
+            model_cache_uuid="$(blkid -s UUID -o value "${!model_cache_device}")"
+            echo "UUID=${!model_cache_uuid} /mnt/model-cache xfs defaults,nofail 0 2" >> /etc/fstab
+            chmod 0755 /mnt/model-cache
+            systemctl enable --now ecs
+
+            if dnf install -y amazon-cloudwatch-agent; then
+              cat > /opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json <<'EOF'
             {
               "agent": {
                 "metrics_collection_interval": 60
@@ -550,14 +572,23 @@ Resources:
               }
             }
             EOF
-            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-              -a fetch-config \
-              -m ec2 \
-              -s \
-              -c file:/opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a fetch-config \
+                -m ec2 \
+                -s \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/customer-ops-gpu.json \
+                || echo "CloudWatch GPU metrics setup failed; ECS remains available" >&2
+            else
+              echo "CloudWatch agent installation failed; ECS remains available" >&2
+            fi
 
   GpuAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: 0
+        PauseTime: PT5M
     Properties:
       AutoScalingGroupName: !Sub customer-ops-${Environment}-gpu
       MinSize: "0"

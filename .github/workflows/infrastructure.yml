@@ -135,8 +135,23 @@ jobs:
 
       - name: Require existing production stacks
         run: |
-          aws cloudformation describe-stacks --stack-name "${FOUNDATION_STACK}" >/dev/null
-          aws cloudformation describe-stacks --stack-name "${RUNTIME_STACK}" >/dev/null
+          for stack in "${FOUNDATION_STACK}" "${RUNTIME_STACK}"; do
+            status="$(
+              aws cloudformation describe-stacks \
+                --stack-name "${stack}" \
+                --query 'Stacks[0].StackStatus' \
+                --output text
+            )"
+            case "${status}" in
+              CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+                echo "${stack}: ${status}"
+                ;;
+              *)
+                echo "::error::Stack ${stack} is not stable (${status}). Wait for completion or cancel/finish the current update before rerunning this workflow."
+                exit 1
+                ;;
+            esac
+          done
 
       - name: Validate CloudFormation
         run: |
@@ -184,6 +199,7 @@ jobs:
           ecs_cluster="$(output "${RUNTIME_STACK}" EcsClusterName)"
           model_api_service="$(output "${RUNTIME_STACK}" ModelApiServiceName)"
           model_server_service="$(output "${RUNTIME_STACK}" ModelServerServiceName)"
+          current_model_server_compute="$(output "${RUNTIME_STACK}" ModelServerComputeType)"
           model_api_task_definition="$(active_service_task_definition "${model_api_service}" "${ecs_cluster}")"
           model_server_task_definition="$(active_service_task_definition "${model_server_service}" "${ecs_cluster}")"
           model_api_image="$(task_definition_image "${model_api_task_definition}" model-api)"
@@ -201,12 +217,8 @@ jobs:
             fi
           done
           if [ -z "${model_server_gpu_layers}" ] || [ "${model_server_gpu_layers}" = "None" ]; then
-            if [ "${{ inputs.model_server_compute }}" = "GPU_EC2" ]; then
-              model_server_gpu_layers="-1"
-            else
-              model_server_gpu_layers="0"
-            fi
-            echo "::notice::The active task definition does not set MODEL_GPU_LAYERS; using ${model_server_gpu_layers} for ${{ inputs.model_server_compute }}."
+            model_server_gpu_layers="0"
+            echo "::notice::The active task definition does not set MODEL_GPU_LAYERS; using the safe bootstrap value 0. The GPU image workflow enables offload after infrastructure is healthy."
           fi
           if [ "${model_server_gpu_layers}" != "-1" ] && [ "${model_server_gpu_layers}" != "0" ]; then
             echo "::error::Unexpected MODEL_GPU_LAYERS value: ${model_server_gpu_layers}"
@@ -219,12 +231,48 @@ jobs:
             echo "MODEL_API_IMAGE=${model_api_image}"
             echo "MODEL_SERVER_IMAGE=${model_server_image}"
             echo "MODEL_SERVER_GPU_LAYERS=${model_server_gpu_layers}"
+            echo "CURRENT_MODEL_SERVER_COMPUTE=${current_model_server_compute}"
+            echo "ECS_CLUSTER=${ecs_cluster}"
+            echo "MODEL_SERVER_SERVICE=${model_server_service}"
             echo "MODEL_BUCKET=$(parameter ModelBucketName)"
             echo "MODEL_OBJECT_KEY=$(parameter ModelObjectKey)"
             echo "EMBEDDING_PREFIX=$(parameter EmbeddingModelPrefix)"
             echo "RERANK_PREFIX=$(parameter RerankModelPrefix)"
             echo "MODEL_SHA256=$(parameter ModelSha256)"
           } >> "${GITHUB_ENV}"
+
+      - name: Verify model artifacts and healthy bootstrap service
+        run: |
+          if [ "${CURRENT_MODEL_SERVER_COMPUTE}" = "FARGATE" ] \
+              && [ "${{ inputs.model_server_compute }}" = "GPU_EC2" ]; then
+            service_counts="$(
+              aws ecs describe-services \
+                --cluster "${ECS_CLUSTER}" \
+                --services "${MODEL_SERVER_SERVICE}" \
+                --query 'services[0].[desiredCount,runningCount,pendingCount]' \
+                --output text
+            )"
+            read -r desired running pending <<< "${service_counts}"
+            if [ "${desired}" -lt 1 ] || [ "${running}" -ne "${desired}" ] || [ "${pending}" -ne 0 ]; then
+              echo "::error::The Fargate bootstrap model-server is not stable (desired=${desired}, running=${running}, pending=${pending}). Restore it before the first GPU migration."
+              exit 1
+            fi
+          else
+            echo "Skipping bootstrap health gate for ${CURRENT_MODEL_SERVER_COMPUTE} -> ${{ inputs.model_server_compute }} so a broken deployment can be repaired or rolled back."
+          fi
+
+          aws s3api head-object \
+            --bucket "${MODEL_BUCKET}" \
+            --key "${MODEL_OBJECT_KEY}" \
+            >/dev/null
+          for prefix in "${EMBEDDING_PREFIX}" "${RERANK_PREFIX}"; do
+            for artifact in SHA256SUMS model.onnx model.onnx_data tokenizer.json; do
+              aws s3api head-object \
+                --bucket "${MODEL_BUCKET}" \
+                --key "${prefix}${artifact}" \
+                >/dev/null
+            done
+          done
 
       - name: Build and upload event worker
         working-directory: apps/event-worker
@@ -237,14 +285,41 @@ jobs:
             --only-show-errors
           echo "EVENT_WORKER_CODE_KEY=${key}" >> "${GITHUB_ENV}"
 
+      - name: Refresh AWS credentials before foundation update
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Update foundation without replacing secrets
         run: |
-          if ! aws cloudformation deploy \
+          set +e
+          timeout --foreground 25m aws cloudformation deploy \
               --stack-name "${FOUNDATION_STACK}" \
               --template-file infra/cloudformation/foundation.yml \
               --capabilities CAPABILITY_NAMED_IAM \
               --no-fail-on-empty-changeset \
-              --parameter-overrides Environment=production; then
+              --parameter-overrides Environment=production
+          deploy_status=$?
+          set -e
+
+          if [ "${deploy_status}" -eq 124 ]; then
+            stack_status="$(
+              aws cloudformation describe-stacks \
+                --stack-name "${FOUNDATION_STACK}" \
+                --query 'Stacks[0].StackStatus' \
+                --output text
+            )"
+            if [ "${stack_status}" = "UPDATE_IN_PROGRESS" ]; then
+              aws cloudformation cancel-update-stack \
+                --stack-name "${FOUNDATION_STACK}"
+              echo "::error::Foundation update exceeded 25 minutes and rollback was requested."
+            else
+              echo "::error::Foundation update exceeded 25 minutes; current stack status is ${stack_status}."
+            fi
+            exit 1
+          fi
+          if [ "${deploy_status}" -ne 0 ]; then
             aws cloudformation describe-stack-events \
               --stack-name "${FOUNDATION_STACK}" \
               --max-items 40 \
@@ -279,9 +354,16 @@ jobs:
           fi
           echo "PERFORMANCE_CLEANER_IMAGE=${image}" >> "${GITHUB_ENV}"
 
+      - name: Refresh AWS credentials before runtime update
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Update runtime while preserving application artifacts
         run: |
-          if ! aws cloudformation deploy \
+          set +e
+          timeout --foreground 45m aws cloudformation deploy \
               --stack-name "${RUNTIME_STACK}" \
               --template-file infra/cloudformation/runtime.yml \
               --capabilities CAPABILITY_NAMED_IAM \
@@ -301,7 +383,27 @@ jobs:
                 ModelSha256="${MODEL_SHA256}" \
                 ModelServerComputeType="${{ inputs.model_server_compute }}" \
                 ModelServerGpuLayers="${MODEL_SERVER_GPU_LAYERS}" \
-                BackendCanaryPercent=0; then
+                BackendCanaryPercent=0
+          deploy_status=$?
+          set -e
+
+          if [ "${deploy_status}" -eq 124 ]; then
+            stack_status="$(
+              aws cloudformation describe-stacks \
+                --stack-name "${RUNTIME_STACK}" \
+                --query 'Stacks[0].StackStatus' \
+                --output text
+            )"
+            if [ "${stack_status}" = "UPDATE_IN_PROGRESS" ]; then
+              aws cloudformation cancel-update-stack \
+                --stack-name "${RUNTIME_STACK}"
+              echo "::error::Runtime update exceeded 45 minutes and rollback was requested."
+            else
+              echo "::error::Runtime update exceeded 45 minutes; current stack status is ${stack_status}."
+            fi
+            exit 1
+          fi
+          if [ "${deploy_status}" -ne 0 ]; then
             aws cloudformation describe-stack-events \
               --stack-name "${RUNTIME_STACK}" \
               --max-items 40 \

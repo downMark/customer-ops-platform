@@ -42,6 +42,31 @@ remove_appledouble_files() {
   fi
 }
 
+enforce_errors_only_profile() {
+  # 本项目只用 Sentry 的 issue 聚合与告警；性能指标与 trace 由 console 直读
+  # S3/DynamoDB，不经过 Sentry。feature-complete 会拉起 72 个服务、常驻约 14 GiB，
+  # 在 16 GiB 机器上 web 会被 OOM kill；errors-only 只留 31 个，错误链路完整。
+  local target="${SENTRY_DIR}/.env"
+  local staged="${target}.staged"
+
+  [ -f "${target}" ] || return 0
+  grep -q '^COMPOSE_PROFILES=feature-complete$' "${target}" || return 0
+
+  echo "Switching Sentry to the errors-only profile (issue 聚合足够，省约 41 个服务)..."
+  sed 's/^COMPOSE_PROFILES=feature-complete$/COMPOSE_PROFILES=errors-only/' \
+    "${target}" >"${staged}" && mv "${staged}" "${target}"
+}
+
+warm_host_mount() {
+  # Docker Desktop 首次为一个外置卷建立 /host_mnt/<volume> 时不是并发安全的：多个
+  # 容器同时 bind-mount 同一外置卷，只有一个能建成，其余报
+  # "mkdir /host_mnt/...: file exists" 并直接失败。Sentry 的 redis 与 clickhouse
+  # 正好是第一批需要 host bind-mount 的服务且并发启动，会稳定踩中。
+  # 先用一次性容器把该路径建好，后续并发挂载直接复用。
+  [ -d "${SENTRY_DIR}" ] || return 0
+  docker run --rm -v "${SENTRY_DIR}:/warm:ro" busybox true >/dev/null 2>&1 || true
+}
+
 apply_sentry_patches() {
   local target="${SENTRY_DIR}/install/update-docker-images.sh"
 
@@ -126,7 +151,9 @@ fi
 # Docker build context (for example jq/._Dockerfile on exFAT volumes).
 remove_appledouble_files "${SENTRY_DIR}"
 apply_sentry_patches
+enforce_errors_only_profile
 pull_sentry_images_sequentially
+warm_host_mount
 (
   cd "${SENTRY_DIR}"
   COPYFILE_DISABLE=1 \
