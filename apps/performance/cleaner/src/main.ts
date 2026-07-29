@@ -74,6 +74,13 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(JSON.stringify({ level: "error", message: "cleaner stopped", errorType: error?.name || "Error" }));
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  console.error(JSON.stringify({
+    level: "error",
+    message: "cleaner stopped",
+    errorType: error?.name || "Error",
+    errorMessage: errorMessage.slice(0, 1_000),
+    requestId: error?.$metadata?.requestId,
+  }));
   process.exitCode = 1;
 });

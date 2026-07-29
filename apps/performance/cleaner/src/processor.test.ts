@@ -67,6 +67,34 @@ test("deduplicates event IDs and writes release-aware aggregate plus gzip detail
     (updates[0].ExpressionAttributeNames as Record<string, string>)["#bucket"],
     "histogram_b5",
   );
+  assert.deepEqual(
+    updates[0].ExpressionAttributeNames,
+    {
+      "#environment": "environment",
+      "#bucketStart": "bucketStart",
+      "#service": "service",
+      "#release": "release",
+      "#operation": "operation",
+      "#eventType": "eventType",
+      "#expiresAt": "expiresAt",
+      "#sampleCount": "sampleCount",
+      "#errorCount": "errorCount",
+      "#totalDurationMs": "totalDurationMs",
+      "#bucket": "histogram_b5",
+      "#mttftMs": "mttftMs",
+    },
+  );
+  const updateExpression = String(updates[0].UpdateExpression);
+  for (const name of [
+    "environment", "bucketStart", "service", "release", "operation",
+    "eventType", "expiresAt", "sampleCount", "errorCount", "totalDurationMs",
+  ]) {
+    assert.doesNotMatch(
+      updateExpression,
+      new RegExp(`(?<![#:\\w])${name}\\s*=`),
+      `${name} must be referenced through ExpressionAttributeNames`,
+    );
+  }
   assert.equal(objects.length, 1);
   assert.match(String(objects[0].Key), /service=model-server/);
   const detail = gunzipSync(objects[0].Body as Uint8Array).toString("utf8");

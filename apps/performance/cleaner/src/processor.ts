@@ -79,7 +79,22 @@ export class EventProcessor {
     const bucketStart = minuteBucket(event.occurredAt);
     const duration = event.durationMs ?? 0;
     const bucket = histogramBucket(duration);
-    const metricNames: Record<string, string> = { "#bucket": `histogram_${bucket}` };
+    // DynamoDB 的保留字集合很大，而且会随表达式解析上下文产生歧义。
+    // release / operation 等业务字段不能直接拼进 UpdateExpression，统一使用
+    // ExpressionAttributeNames，避免生产环境以 ValidationException 终止消费。
+    const metricNames: Record<string, string> = {
+      "#environment": "environment",
+      "#bucketStart": "bucketStart",
+      "#service": "service",
+      "#release": "release",
+      "#operation": "operation",
+      "#eventType": "eventType",
+      "#expiresAt": "expiresAt",
+      "#sampleCount": "sampleCount",
+      "#errorCount": "errorCount",
+      "#totalDurationMs": "totalDurationMs",
+      "#bucket": `histogram_${bucket}`,
+    };
     const values: Record<string, unknown> = {
       ":zero": 0, ":one": 1, ":duration": duration,
       ":error": event.status === "ok" ? 0 : 1,
@@ -102,16 +117,16 @@ export class EventProcessor {
         pk: `${event.environment}#${event.service}#${event.release}#${event.operation}#${event.eventType}`,
         sk: bucketStart,
       },
-      UpdateExpression: `SET environment = if_not_exists(environment, :environment),
-        bucketStart = if_not_exists(bucketStart, :bucketStart),
-        service = if_not_exists(service, :service),
-        release = if_not_exists(release, :release),
-        operation = if_not_exists(operation, :operation),
-        eventType = if_not_exists(eventType, :eventType),
-        expiresAt = :expiresAt,
-        sampleCount = if_not_exists(sampleCount, :zero) + :one,
-        errorCount = if_not_exists(errorCount, :zero) + :error,
-        totalDurationMs = if_not_exists(totalDurationMs, :zero) + :duration,
+      UpdateExpression: `SET #environment = if_not_exists(#environment, :environment),
+        #bucketStart = if_not_exists(#bucketStart, :bucketStart),
+        #service = if_not_exists(#service, :service),
+        #release = if_not_exists(#release, :release),
+        #operation = if_not_exists(#operation, :operation),
+        #eventType = if_not_exists(#eventType, :eventType),
+        #expiresAt = :expiresAt,
+        #sampleCount = if_not_exists(#sampleCount, :zero) + :one,
+        #errorCount = if_not_exists(#errorCount, :zero) + :error,
+        #totalDurationMs = if_not_exists(#totalDurationMs, :zero) + :duration,
         #bucket = if_not_exists(#bucket, :zero) + :one
         ${metricUpdates.length ? `, ${metricUpdates.join(", ")}` : ""}`,
       ExpressionAttributeNames: metricNames,
