@@ -50,6 +50,7 @@ export class PerformanceMonitor {
       totalMs: result.totalTime,
       rssBytes: memoryUsage.rss,
     }, { component: "react-ssr" });
+    void ssrPerformance.flush();
 
     return result;
   }
@@ -63,4 +64,5 @@ const ssrPerformance = new PerformanceClient({
   environment: process.env.APP_ENVIRONMENT || "local",
   release: process.env.APP_RELEASE || "development",
   sampleRate: 0.1,
+  autoFlush: false,
 });

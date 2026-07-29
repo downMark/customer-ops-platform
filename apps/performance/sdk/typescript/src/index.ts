@@ -63,6 +63,7 @@ export interface PerformanceConfig {
   slowThresholdMs?: number;
   maxQueueSize?: number;
   flushIntervalMs?: number;
+  autoFlush?: boolean;
   sink?: (events: PerformanceEventV1[]) => void | Promise<void>;
 }
 
@@ -119,10 +120,13 @@ export class PerformanceClient {
       slowThresholdMs: Math.max(0, config.slowThresholdMs ?? 2_000),
       maxQueueSize: Math.max(1, config.maxQueueSize ?? 500),
       flushIntervalMs: Math.max(100, config.flushIntervalMs ?? 1_000),
+      autoFlush: config.autoFlush ?? true,
     };
     this.sink = config.sink ?? defaultSink;
-    this.timer = setInterval(() => void this.flush(), this.config.flushIntervalMs);
-    this.timer.unref?.();
+    if (this.config.autoFlush) {
+      this.timer = setInterval(() => void this.flush(), this.config.flushIntervalMs);
+      this.timer.unref?.();
+    }
   }
 
   startSpan(

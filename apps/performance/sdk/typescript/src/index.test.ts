@@ -42,6 +42,27 @@ test("drops non-whitelisted fields and URL queries before logging", async () => 
   assert.deepEqual(events[0].attributes, { endpoint: "/api/orders" });
 });
 
+test("can be constructed without scheduling a global flush timer", async () => {
+  const originalSetInterval = globalThis.setInterval;
+  let timerScheduled = false;
+  globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+    timerScheduled = true;
+    return originalSetInterval(...args);
+  }) as typeof setInterval;
+  try {
+    const client = new PerformanceClient({
+      service: "frontend-ssr",
+      autoFlush: false,
+      sink: () => {},
+    });
+    client.recordMetric("ssr.render", { totalMs: 1 });
+    await client.close();
+    assert.equal(timerScheduled, false);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+  }
+});
+
 test("keeps start/finish p95 overhead below one millisecond", async () => {
   const client = new PerformanceClient({
     service: "model-api",

@@ -11,6 +11,7 @@ export const browserPerformance = new PerformanceClient({
   environment: import.meta.env.MODE === "production" ? "production" : "local",
   release: import.meta.env.VITE_APP_RELEASE || "development",
   sampleRate: 0.1,
+  autoFlush: typeof window !== "undefined",
   sink: createBrowserSink(
     `${getModelApiBaseURL()}/api/telemetry/v1/batch`,
     () => AuthService.getAccessToken(),
